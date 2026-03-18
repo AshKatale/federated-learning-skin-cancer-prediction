@@ -1,0 +1,368 @@
+# FEDERATED LEARNING - DATA FLOW DIAGRAM
+
+## One Complete Federated Round
+
+```
+TIME ─────────────────────────────────────────────────────────────────────►
+
+T=0   CLIENT_1           SERVER              CLIENT_2           CLIENT_3
+       │                   │                   │                   │
+      │────GET /get_model─►│                   │                   │
+      │←── weights ────────│                   │                   │
+      │                   │◄────GET /get_model─│                   │
+      │                   │────weights────────►│                   │
+      │                   │                   │◄────GET /get_model─│
+      │                   │────weights────────►│                   │
+      │                   │                   │                   │
+T=1   │ TRAIN LOCAL       │                   │ TRAIN LOCAL       │ TRAIN LOCAL
+      │ ╔════════════╗    │                   │ ╔════════════╗    │ ╔════════════╗
+      │ ║ ML Model   ║    │                   │ ║ ML Model   ║    │ ║ ML Model   ║
+      │ ║ Data: D1   ║    │                   │ ║ Data: D2   ║    │ ║ Data: D3   ║
+      │ ║ 100 samples║    │                   │ ║ 120 samples║    │ ║ 80 samples ║
+      │ ╚════════════╝    │                   │ ╚════════════╝    │ ╚════════════╝
+      │ (Training...)     │                   │ (Training...)     │ (Training...)
+      │                   │                   │                   │
+T=2   │ ✓ Trained         │                   │ ✓ Trained         │ ✓ Trained
+      │                   │                   │                   │
+      │─POST /update──────►│                   │                   │
+      │ (weights, 100)    │                   │                   │
+      │                   │ STORE UPDATE      │                   │
+      │                   │ from client_1     │                   │
+      │                   │                   │─POST /update──────►│
+      │                   │                   │ (weights, 120)    │
+      │                   │                   │                   │ STORE UPDATE
+      │                   │                   │                   │ from client_2
+      │                   │                   │                   │
+      │                   │◄────────POST /update─────────────────│
+      │                   │       (weights, 80)                   │
+      │                   │       STORE UPDATE from client_3      │
+      │                   │                   │                   │
+T=3   │                   │ HAVE ALL UPDATES  │                   │
+      │                   │ Ready to aggregate│                   │
+      │                   │                   │                   │
+      │                   │ ╔═════════════════════╗                │
+      │                   │ ║ AGGREGATE           ║                │
+      │                   │ ║ w_new = (w1+w2+w3)/3║                │
+      │                   │ ║      OR             ║                │
+      │                   │ ║ w_new = weighte avg ║                │
+      │                   │ ╚═════════════════════╝                │
+      │                   │                   │                   │
+      │────GET /get_model─►│                   │                   │
+      │◄──NEW WEIGHTS─────│                   │                   │
+      │                   │                   │                   │
+      │                   │◄────GET /get_model─│                   │
+      │                   │───NEW WEIGHTS────►│                   │
+      │                   │                   │                   │
+      │                   │                   │──GET /get_model───►│
+      │                   │───NEW WEIGHTS─────────────────────────►
+      │                   │                   │                   │
+T=4   │                   │  NEXT ROUND BEGINS │                   │
+      │ READY FOR         │  All clients have  │ READY FOR        │ READY FOR
+      │ ROUND 2           │  new global model  │ ROUND 2          │ ROUND 2
+      │                   │                   │                   │
+      ▼                   ▼                   ▼                   ▼
+```
+
+---
+
+## Request/Response Flow Detail
+
+### Phase 1: Download Global Model
+```
+CLIENT                              SERVER
+│                                   │
+├──GET /get_model ────────────────►│
+│                                   │
+│  • Returns current model weights  │
+│  • Returns current round number   │
+│                                   │
+│◄──JSON Response Module{────────────┤
+│   {                                │
+│     "weights": [v1, v2, ...],     │
+│     "bias": b,                    │
+│     "round": 1                    │
+│   }                               │
+│                                   │
+```
+
+### Phase 2: Local Training
+```
+CLIENT                   (no server communication)
+│
+├─── LOAD DATA: X_train, y_train
+├─── LOAD WEIGHTS: from server
+├─── TRAIN: model.fit(X_train, y_train)
+│   ╔══════════════════════════════╗
+│   ║ Training (1-100ms on CPU)    ║
+│   ║ Calculate new weights        ║
+│   ╚══════════════════════════════╝
+├─── EXTRACT: weights, bias
+│    Ready to send back
+```
+
+### Phase 3: Upload Updates
+```
+CLIENT                              SERVER
+│                                   │
+├──POST /update_model ─────────────►│
+│  {                                │
+│    "client_id": "client_1",      │
+│    "weights": [w1, w2, ...],     │
+│    "bias": b,                    │
+│    "num_samples": 100            │
+│  }                               │
+│                                   │ STORE IN MEMORY:
+│                                   │ {
+│◄──JSON Response Module─────────────│   "client_1": {
+│   {                                │     "weights": [...],
+│    "success": true,              │     "bias": b,
+│    "message": "Update received",  │     "num_samples": 100
+│    "round": 1                    │   }
+│   }                               │ }
+│                                   │
+```
+
+### Phase 4: Server Aggregation
+```
+SERVER                              PROCESS
+│                                   │
+├─ Updates received from:           │
+│  • client_1: weights_A            │
+│  • client_2: weights_B            │
+│  • client_3: weights_C            │
+│                                   │
+├─ Calculate average:               ├─ Simple Average:
+│  (A + B + C) / 3                 │   weights = (A + B + C) / 3
+│                                   │   OR
+│  OR                              ├─ Weighted Average:
+│  (A*n1 + B*n2 + C*n3)/(n1+n2+n3) │   w = (A*100 + B*120 + C*80) / 300
+│                                   │
+│  Update global model              │
+│  global_round += 1                │
+│                                   │
+│  Clear updates for next round     │
+```
+
+---
+
+## System State Evolution
+
+```
+                    │   Round 0      Round 1      Round 2      Round 3
+                    │
+Global Model        │   random ───► trained ───► better ───► best
+Weights             │   (0.01)       (0.45)       (0.52)     (0.58)
+                    │
+Client 1            │ download ───► train ───► upload ───► download
+Actions             │               data         weights       new
+                    │
+Client 2            │ download ───► train ───► upload ───► download
+Actions             │               data         weights       new
+                    │
+Client 3            │ download ───► train ───► upload ───► download
+Actions             │               data         weights       new
+                    │
+Model RMSE          │   18.2 ────► 16.8 ────► 16.2 ────► 15.5
+(Test Set)          │              (8%)        (11%)       (15%)
+                    │
+```
+
+---
+
+## Federated vs Centralized Comparison
+
+```
+╔═══════════════════════════════════════════════════════════════╗
+║                   CENTRALIZED LEARNING                        ║
+╚═══════════════════════════════════════════════════════════════╝
+
+Data                Server              Model
+├─ D1            ├─ D1+D2+D3 ────► ├─ Train all
+├─ D2      ───►  ├─ (All Data!)        data
+├─ D3            │                  ├─ Global
+│                │                  │  Model
+│ PRIVACY RISK   │ BOTTLENECK       │
+└─────────────────┴─────────────────┘
+
+Problems:
+  • Privacy: All data shared with server
+  • Centralization: Single point of failure
+  • Bandwidth: All raw data transmitted
+  • Compliance: May violate regulations
+
+
+╔═══════════════════════════════════════════════════════════════╗
+║                   FEDERATED LEARNING                          ║
+╚═══════════════════════════════════════════════════════════════╝
+
+Data                Client              Server
+├─ D1   (private)   ├─ Train local   ├─ Weights only
+├─ D2   (private)   ├─ Extract w1    ├─ Average
+├─ D3   (private)   ├─ Send w1 ───► ├─ New model
+│                   │                │
+│ STAYS LOCAL       │ NEVER SHARE    │
+└────────────────────┴────────────────┴─────────────────┐
+                                                        │
+                                                 Global Model
+                                                 (trained on
+                                                  combined D1+D2+D3
+                                                  without seeing
+                                                  raw data!)
+
+Benefits:
+  • Privacy: Raw data never shared
+  • Decentralized: No central server needed
+  • Bandwidth: Only weights transmitted (small)
+  • Compliance: Data stays on-device/on-premise
+```
+
+---
+
+## Network Requests Per Round
+
+```
+Round 1 Requests (3 clients):
+
+  CLIENT_1                CLIENT_2                CLIENT_3
+  │                       │                       │
+  ├-1: GET /get_model     ├-1: GET /get_model    ├-1: GET /get_model
+  │←   (weights)          │←   (weights)         │←   (weights)
+  │                       │                       │
+  │                  [LOCAL TRAINING - no network]
+  │                       │                       │
+  ├-2: POST /update_model ├-2: POST /update_model├-2: POST /update_model
+  │    (weights)          │    (weights)         │    (weights)
+  │                       │                       │
+  └──────────────────────────────────────────────┬───────────────────┐
+                                                  │                   │
+                                             SERVER AGGREGATES        │
+                                             Weights wait for all 3   │
+                                             │                        │
+                                             ├─ avg = (w1+w2+w3)/3  │
+                                             │                        │
+                                             ├─ round = 2            │
+                                             │                        │
+                                             ├─ ready for next       │
+                                             │                        │
+  ┌──────────────────────────────────────────┴────────────────────┘  │
+  │                                                                    │
+  ├-3: GET /get_model     ├-3: GET /get_model    ├-3: GET /get_model│
+  │←   (new weights)      │←   (new weights)     │←   (new weights) │
+  │                       │                       │                  │
+  └───────────────────────┴───────────────────────┴──────────────────┘
+  
+Total Network Calls: 3 download + 3 upload + 3 download = 9 requests
+Total Data: ~3KB (vs 100MB+ if raw data shared!)
+Time: ~100ms per round
+```
+
+---
+
+## Error Scenarios
+
+```
+╔════════════════════════════════════════════════════════════╗
+║              ERROR HANDLING IN AGGREGATION                ║
+╚════════════════════════════════════════════════════════════╝
+
+Scenario: Client missing
+
+  SERVER WAITING:
+  ├─ client_1 ✓ (weights received)
+  ├─ client_2 ✓ (weights received)
+  ├─ client_3 ✗ (NO RESPONSE)
+  
+  POST /aggregate
+  {
+    "client_ids": ["client_1", "client_2", "client_3"],
+    "method": "average"
+  }
+  
+  RESPONSE (400 Error):
+  {
+    "success": false,
+    "error": "Missing updates from: client_3",
+    "received": 2,
+    "expected": 3
+  }
+  
+  ACTION: Wait for client_3 or skip it
+
+Scenario: Only 2 clients aggregate
+
+  POST /aggregate
+  {
+    "client_ids": ["client_1", "client_2"],
+    "method": "average"
+  }
+  
+  RESPONSE (200 Success):
+  {
+    "success": true,
+    "message": "Aggregated 2 updates",
+    "round": 2
+  }
+  
+  RESULT: Works! (fewer clients = noisier, but ok)
+```
+
+---
+
+## Performance Timeline
+
+```
+Time     | Action              | Duration | Cumulative
+─────────┼─────────────────────┼──────────┼───────────
+0ms      | Start round 1       |    -     |    0ms
+         |                     |          |
+5ms      | Client_1 downloads  |   5ms    |    5ms
+10ms     | Client_2 downloads  |   5ms    |   10ms
+15ms     | Client_3 downloads  |   5ms    |   15ms
+         |                     |          |
+20ms     | Client_1 trains     |  10ms    |   25ms
+30ms     | Client_2 trains     |  10ms    |   35ms
+40ms     | Client_3 trains     |  10ms    |   45ms
+         |                     |          |
+50ms     | Client_1 uploads    |   3ms    |   53ms
+53ms     | Client_2 uploads    |   3ms    |   56ms
+56ms     | Client_3 uploads    |   3ms    |   59ms
+         |                     |          |
+60ms     | Server aggregates   |   2ms    |   61ms
+         |                     |          |
+65ms     | Round 1 complete    |   -      |   65ms
+
+─────────────────────────────────────────────────────
+5 rounds total: ~325ms
+(Could be 50ms if truly parallel with async)
+```
+
+---
+
+## Bandwidth Usage Comparison
+
+```
+╔════════════════════════════════════════════════════╗
+║           BANDWIDTH REQUIREMENTS                   ║
+╚════════════════════════════════════════════════════╝
+
+Scenario: 3 Clients, 100 features, 100K samples each
+
+CENTRALIZED LEARNING:
+└─ Send all data to server
+   ├─ 3 clients × 100K samples × 100 features × 8 bytes
+   ├─ = 3 × 80MB
+   └─ = 240MB per round (HUGE!)
+
+FEDERATED LEARNING:
+└─ Send only model weights
+   ├─ 3 clients × (100 weights + 1 bias) × 8 bytes
+   ├─ = 3 × 808 bytes
+   ├─ = 2.4 KB per round
+   └─ = 97.5MB SAVED per round!
+
+SAVINGS: 97.5 MB / 240 MB = 99.9% reduction!
+```
+
+---
+
+This demonstrates why federated learning is critical for privacy and efficiency.
