@@ -1,0 +1,46 @@
+{
+  "name": "skin-cancer-detection-desktop",
+  "version": "1.0.0",
+  "description": "Desktop app for federated learning-based skin cancer detection",
+  "main": "main.js",
+  "homepage": "./",
+  "scripts": {
+    "start": "electron .",
+    "dev": "concurrently \"npm run server\" \"npm run flask\" \"electron .\"",
+    "server": "cd ../server && npm start",
+    "flask": "cd ../federated-learning && python app.py",
+    "build": "electron-builder",
+    "build-win": "electron-builder --win --publish never",
+    "build-mac": "electron-builder --mac --publish never",
+    "build-linux": "electron-builder --linux --publish never"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "electron": "^27.0.0",
+    "electron-builder": "^24.6.4",
+    "concurrently": "^8.2.1"
+  },
+  "build": {
+    "appId": "com.skin-cancer-detection.app",
+    "productName": "Skin Cancer Detection",
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "certificateFile": null,
+      "certificatePassword": null
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

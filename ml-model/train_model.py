@@ -4,6 +4,7 @@ Loads HAM10000 dataset and trains the EfficientNet model
 """
 
 import os
+import sys
 import pandas as pd
 import numpy as np
 import torch
@@ -19,6 +20,10 @@ import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix
 
 from skin_cancer_model import SkinCancerModel, SkinCancerDataset
+
+# Force unbuffered output for real-time logging
+sys.stdout.flush()
+sys.stderr.flush()
 
 
 class ModelTrainer:
@@ -36,13 +41,18 @@ class ModelTrainer:
         # Read metadata
         df = pd.read_csv(metadata_path)
         
-        # Create image path mapping
+        # Create image path mapping - support all 3 parts for federated learning
         image_dict = {}
-        image_path_1 = os.path.join(dataset_path, "HAM10000_images_part_1")
-        image_path_2 = os.path.join(dataset_path, "HAM10000_images_part_2")
+        image_paths = [
+            os.path.join(dataset_path, "HAM10000_images_part_1"),
+            os.path.join(dataset_path, "HAM10000_images_part_2"),
+            os.path.join(dataset_path, "HAM10000_images_part_3")
+        ]
         
-        for folder in [image_path_1, image_path_2]:
+        for folder in image_paths:
             if os.path.exists(folder):
+                print(f"[LOAD] Loading images from {folder}...")
+                sys.stdout.flush()
                 for img in os.listdir(folder):
                     image_dict[img.split(".")[0]] = os.path.join(folder, img)
         
@@ -102,13 +112,14 @@ class ModelTrainer:
         val_losses = []
         
         for epoch in range(epochs):
-            print(f"\nEpoch {epoch+1}/{epochs}")
+            print(f"\n[EPOCH] Epoch {epoch+1}/{epochs}")
+            sys.stdout.flush()
             
             # Training
             self.model.model.train()
             train_loss = 0
             
-            for images, labels in train_loader:
+            for batch_idx, (images, labels) in enumerate(train_loader):
                 images = images.to(self.device)
                 labels = labels.to(self.device)
                 
@@ -120,6 +131,11 @@ class ModelTrainer:
                 optimizer.step()
                 
                 train_loss += loss.item()
+                
+                # Log progress every 10 batches
+                if (batch_idx + 1) % 10 == 0:
+                    print(f"[BATCH] {batch_idx+1}/{len(train_loader)}, Loss: {loss.item():.4f}")
+                    sys.stdout.flush()
             
             train_loss = train_loss / len(train_loader)
             train_losses.append(train_loss)
@@ -140,7 +156,8 @@ class ModelTrainer:
             val_loss = val_loss / len(val_loader)
             val_losses.append(val_loss)
             
-            print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            print(f"[RESULT] Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            sys.stdout.flush()
             
             scheduler.step(val_loss)
             
@@ -150,7 +167,8 @@ class ModelTrainer:
                 counter = 0
                 model_path = os.path.join(self.output_dir, "best_skin_cancer_model.pth")
                 self.model.save_model(model_path)
-                print("✓ Model improved and saved")
+                print("[OK] Model improved and saved")
+                sys.stdout.flush()
             else:
                 counter += 1
                 if counter >= patience:
@@ -167,7 +185,8 @@ class ModelTrainer:
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.savefig(os.path.join(self.output_dir, "training_history.png"))
-        print(f"Training history saved to {self.output_dir}/training_history.png")
+        print(f"[SAVE] Training history saved to {self.output_dir}/training_history.png")
+        sys.stdout.flush()
         
         return train_losses, val_losses
     
@@ -196,7 +215,8 @@ class ModelTrainer:
                 all_labels.extend(labels.cpu().numpy())
         
         accuracy = correct / total
-        print(f"\nValidation Accuracy: {accuracy:.4f}")
+        print(f"\n[EVAL] Validation Accuracy: {accuracy:.4f}")
+        sys.stdout.flush()
         print("\nClassification Report:")
         print(classification_report(all_labels, all_preds, 
                                    target_names=SkinCancerModel.CLASS_NAMES))
@@ -219,32 +239,38 @@ class ModelTrainer:
 
 if __name__ == "__main__":
     # Configuration
-    DATASET_PATH = "/path/to/HAM10000_dataset"  # Update with actual dataset path
+    DATASET_PATH = "D:\\Skin Cancer Dataset"  # Root dataset path with all 3 parts
     METADATA_PATH = os.path.join(DATASET_PATH, "HAM10000_metadata.csv")
     MODEL_OUTPUT_DIR = "./models"
     
     # Initialize model and trainer
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    print(f"[INIT] Using device: {device}")
+    sys.stdout.flush()
     
     model = SkinCancerModel(device=device)
     trainer = ModelTrainer(model, device=device, output_dir=MODEL_OUTPUT_DIR)
     
     # Prepare data
-    print("Preparing data...")
+    print("[LOAD] Preparing data...")
+    sys.stdout.flush()
     train_df, val_df = trainer.prepare_data(DATASET_PATH, METADATA_PATH)
-    print(f"Training samples: {len(train_df)}, Validation samples: {len(val_df)}")
+    print(f"[LOAD] Training samples: {len(train_df)}, Validation samples: {len(val_df)}")
+    sys.stdout.flush()
     
     # Train model
-    print("\nStarting training...")
+    print("[TRAIN] Starting training...")
+    sys.stdout.flush()
     train_losses, val_losses = trainer.train(train_df, val_df, epochs=15, batch_size=32)
     
     # Evaluate
-    print("\nEvaluating model...")
+    print("[EVAL] Evaluating model...")
+    sys.stdout.flush()
     val_transform = model.get_transforms(mode='val')
     val_dataset = SkinCancerDataset(val_df, val_transform)
     val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=2)
     
     accuracy = trainer.evaluate(val_df, val_loader)
     
-    print(f"\n✓ Training complete! Model saved to {MODEL_OUTPUT_DIR}")
+    print(f"\n[DONE] Training complete! Model saved to {MODEL_OUTPUT_DIR}")
+    sys.stdout.flush()
