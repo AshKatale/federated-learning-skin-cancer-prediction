@@ -36,7 +36,9 @@ const FL_CLIENT_DIR= path.join(__dirname, 'fl_client');
 // Dev mode: dist not built yet
 const isDev = !fs.existsSync(CLIENT_DIST);
 
-let mainWindow = null;
+let mainWindow   = null;
+let flClientProc = null;  // Flask FL client child process
+let trainProc    = null;  // Active training Python process
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -215,7 +217,7 @@ ipcMain.handle('app-status', async () => {
   };
   return {
     server:    await check(`http://localhost:${SERVER_PORT}/api/health`),
-    fl_client: await check(`http://localhost:${FL_CLIENT_PORT}/health`),
+    fl_client: await check(`http://127.0.0.1:${FL_CLIENT_PORT}/health`),
     python:    getPython(),
     mode:      isDev ? 'development' : 'production',
   };
@@ -238,7 +240,7 @@ ipcMain.handle('train-model', async (_event, opts = {}) => {
     console.log(`[IPC:train-model] PYTHONPATH=${pyEnv.PYTHONPATH}`);
 
     const logs = [];
-    const proc = spawn(python, [
+    trainProc = spawn(python, [
       script,
       '--client-id', clientId,
       '--data-dir',  dataDir,
@@ -249,28 +251,40 @@ ipcMain.handle('train-model', async (_event, opts = {}) => {
       env: pyEnv,
     });
 
-    proc.stdout.on('data', (chunk) => {
+    trainProc.stdout.on('data', (chunk) => {
       chunk.toString().split('\n').filter(Boolean).forEach((line) => {
         logs.push(line);
         sendLog('training-log', line);
       });
     });
 
-    proc.stderr.on('data', (chunk) => {
+    trainProc.stderr.on('data', (chunk) => {
       chunk.toString().split('\n').filter(Boolean).forEach((line) => {
         logs.push(`[stderr] ${line}`);
         sendLog('training-log', `[stderr] ${line}`);
       });
     });
 
-    proc.on('close', (code) => {
+    trainProc.on('close', (code) => {
+      trainProc = null;
       resolve({ success: code === 0, exitCode: code, logs });
     });
 
-    proc.on('error', (err) => {
+    trainProc.on('error', (err) => {
+      trainProc = null;
       resolve({ success: false, error: err.message, logs });
     });
   });
+});
+
+// ── Kill active training process ──────────────────────────────────────────────
+ipcMain.handle('kill-training', () => {
+  if (trainProc && !trainProc.killed) {
+    trainProc.kill('SIGTERM');
+    trainProc = null;
+    return { killed: true };
+  }
+  return { killed: false };
 });
 
 // ── 3. Run prediction — spawns inference_runner.py ───────────────────────────
@@ -340,7 +354,7 @@ ipcMain.handle('select-dataset-folder', async () => {
   if (axios) {
     try {
       const r = await axios.post(
-        `http://localhost:${FL_CLIENT_PORT}/api/set-dataset`,
+        `http://127.0.0.1:${FL_CLIENT_PORT}/api/set-dataset`,
         { data_dir: folderPath },
         { timeout: 5000 }
       );
@@ -357,7 +371,7 @@ ipcMain.handle('select-dataset-folder', async () => {
 const flProxy = (method, endpoint, body = null) => async () => {
   if (!axios) return { error: 'axios not available' };
   try {
-    const url = `http://localhost:${FL_CLIENT_PORT}${endpoint}`;
+    const url = `http://127.0.0.1:${FL_CLIENT_PORT}${endpoint}`;
     const r   = method === 'GET'
       ? await axios.get(url, { timeout: 10000 })
       : await axios.post(url, body || {}, { timeout: 60000 });

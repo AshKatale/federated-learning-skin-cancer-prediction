@@ -68,15 +68,17 @@ def main():
         print(json.dumps(result), flush=True)
         sys.exit(1)
 
-    # FLDataLoader expects the DATASET ROOT (e.g. D:\Skin Cancer Dataset).
-    # It appends HAM10000_images_part_1/2/3 internally.
-    # If user selected a part subfolder, auto-correct to its parent.
-    data_dir = args.data_dir
-    folder_name = os.path.basename(data_dir)
+    # FLDataLoader expects image_dir = the folder with actual images.
+    # If user selected a part subfolder, we keep it as-is for image scanning.
+    # We also derive the CSV search root (may be parent if a part subfolder was selected).
+    image_dir = args.data_dir
+    folder_name = os.path.basename(image_dir)
     if folder_name.startswith('HAM10000_images_part'):
-        data_dir = os.path.dirname(data_dir)
-        log(f'[FL Training] Auto-corrected dataset root to: {data_dir}')
+        data_dir = os.path.dirname(image_dir)  # parent — used ONLY for CSV lookup
+        log(f'[FL Training] Image folder:    {image_dir}')
+        log(f'[FL Training] CSV search root: {data_dir}')
     else:
+        data_dir = image_dir  # same folder used for both
         log(f'[FL Training] Dataset root: {data_dir}')
 
     # ── Import dependencies ───────────────────────────────────────────────────
@@ -127,8 +129,9 @@ def main():
         # 2. In the parent folder (user may have selected an images subfolder)
         parent_dir = os.path.dirname(data_dir)
         candidates = [
-            os.path.join(data_dir,   'HAM10000_metadata.csv'),
-            os.path.join(parent_dir, 'HAM10000_metadata.csv'),
+            os.path.join(image_dir,  'HAM10000_metadata.csv'),  # in selected folder
+            os.path.join(data_dir,   'HAM10000_metadata.csv'),  # in CSV root
+            os.path.join(parent_dir, 'HAM10000_metadata.csv'),  # one level up
         ]
         metadata_path = next((p for p in candidates if os.path.isfile(p)), None)
 
@@ -146,10 +149,10 @@ def main():
 
         X_train, y_train, X_val, y_val = FLDataLoader.load_client_data(
             client_id=args.client_id,
-            dataset_path=data_dir,           # corrected root, not the subfolder
+            dataset_path=image_dir,          # the actual selected images folder
             metadata_path=metadata_path,
             transform_fn=model_wrapper.get_transforms,
-            samples_per_client=200,
+            samples_per_client=999999,       # use ALL images in selected folder
         )
         log(f'[FL Training] Data loaded — train={len(X_train)}, val={len(y_val)}')
 

@@ -19,6 +19,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const VALID_INVOKE = new Set([
   'app-status',
   'train-model',
+  'kill-training',
   'run-prediction',
   'select-file',
   'select-dataset-folder',
@@ -73,6 +74,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
    * @returns {Promise<{ success, logs, exitCode }>}
    */
   trainModel: (opts = {}) => safeInvoke('train-model', opts),
+
+  /** Kill the currently running training process. */
+  killTraining: () => safeInvoke('kill-training'),
 
   /**
    * Run local inference on an image file.

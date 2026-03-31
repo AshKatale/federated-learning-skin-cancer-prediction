@@ -54,21 +54,30 @@ class FLDataLoader:
         # Read metadata
         df = pd.read_csv(metadata_path)
         
-        # Create image path mapping - support all 3 parts
+        # Build image dictionary from the provided folder
         image_dict = {}
-        image_paths = [
-            os.path.join(dataset_path, "HAM10000_images_part_1"),
-            os.path.join(dataset_path, "HAM10000_images_part_2"),
-            os.path.join(dataset_path, "HAM10000_images_part_3")
-        ]
-        
-        # Build image dictionary from all parts
-        for part_path in image_paths:
-            if os.path.exists(part_path):
-                for img_file in os.listdir(part_path):
-                    if img_file.endswith('.jpg'):
-                        image_id = img_file.replace('.jpg', '')
-                        image_dict[image_id] = os.path.join(part_path, img_file)
+
+        # Check if the folder itself contains images directly
+        direct_images = [f for f in os.listdir(dataset_path)
+                         if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+
+        if direct_images:
+            # User provided the images folder directly — scan it
+            scan_paths = [dataset_path]
+        else:
+            # Folder has no images; try HAM10000_images_part_* subfolders
+            scan_paths = [
+                os.path.join(dataset_path, "HAM10000_images_part_1"),
+                os.path.join(dataset_path, "HAM10000_images_part_2"),
+                os.path.join(dataset_path, "HAM10000_images_part_3"),
+            ]
+
+        for folder in scan_paths:
+            if os.path.exists(folder):
+                for img_file in os.listdir(folder):
+                    if img_file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                        image_id = os.path.splitext(img_file)[0]
+                        image_dict[image_id] = os.path.join(folder, img_file)
         
         logger.info(f"[CLIENT {client_id}] Found {len(image_dict)} images in dataset")
         
@@ -82,12 +91,11 @@ class FLDataLoader:
         
         logger.info(f"[CLIENT {client_id}] After filtering: {len(df)} valid images")
         
-        # Distribute samples to this client (round-robin style)
-        # Client 1 gets samples 0, 3, 6, ...; Client 2 gets samples 1, 4, 7, ...
-        client_idx = int(client_id) - 1
-        client_df = df.iloc[client_idx::3].copy()  # Simple distribution across 3 clients
+        # Use all available images (single desktop client — no round-robin split needed)
+        client_df = df.copy()
         
-        # Limit to samples_per_client
+        # Limit to samples_per_client if set (999999 = effectively all)
+        client_idx = int(client_id) - 1
         if len(client_df) > samples_per_client:
             client_df = client_df.sample(n=samples_per_client, random_state=client_idx)
         

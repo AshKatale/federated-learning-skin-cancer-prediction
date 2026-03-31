@@ -126,13 +126,28 @@ export default function FLControlPanel() {
         clientId,
         epochs:   Number(epochs),
       });
-      addLog(result.success
-        ? `[Train] ✅ Completed (exit ${result.exitCode})`
-        : `[Train] ❌ Failed — ${result.error || `exit ${result.exitCode}`}`);
+      if (result?.killed) {
+        addLog('[Train] 🛑 Training stopped by user.');
+      } else {
+        addLog(result.success
+          ? `[Train] ✅ Completed (exit ${result.exitCode})`
+          : `[Train] ❌ Failed — ${result.error || `exit ${result.exitCode}`}`);
+      }
     } catch (e) {
       addLog(`[Train] ❌ Error: ${e.message}`);
     } finally {
       setTraining(false);
+    }
+  };
+
+  const handleStopTraining = async () => {
+    if (!api) return;
+    addLog('[Train] 🛑 Stopping training…');
+    try {
+      const res = await api.killTraining();
+      addLog(res?.killed ? '[Train] 🛑 Training process terminated.' : '[Train] No active training process found.');
+    } catch (e) {
+      addLog(`[Train] ❌ Stop failed: ${e.message}`);
     }
   };
 
@@ -291,7 +306,7 @@ export default function FLControlPanel() {
           </div>
 
           {/* Action buttons */}
-          <div style={{ display: 'flex', gap: 10 }}>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <button
               className="btn btn-primary"
               onClick={handleTrain}
@@ -302,6 +317,22 @@ export default function FLControlPanel() {
                 <><span className="spinner" style={{ width: 14, height: 14, marginRight: 8 }} />Training…</>
               ) : '▶ Start Training'}
             </button>
+            {training && (
+              <button
+                onClick={handleStopTraining}
+                style={{
+                  minWidth: 130, padding: '8px 18px', borderRadius: 8, border: 'none',
+                  cursor: 'pointer', fontSize: 13, fontWeight: 700,
+                  background: '#ef4444', color: '#fff',
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  transition: 'background 0.15s',
+                }}
+                onMouseEnter={e => e.target.style.background = '#dc2626'}
+                onMouseLeave={e => e.target.style.background = '#ef4444'}
+              >
+                ■ Stop Training
+              </button>
+            )}
             <button className="btn btn-secondary" onClick={handleSync} disabled={training}>
               ↻ Sync Global Model
             </button>
