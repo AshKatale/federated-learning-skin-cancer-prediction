@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-FL_SERVER_URL = os.getenv("FL_SERVER_URL", "http://localhost:6000")
+# FL Server URL — must match fl-server/app.py port (default 8080)
+FL_SERVER_URL = os.getenv("FL_SERVER_URL", "http://127.0.0.1:6000")
 CLIENT_ID = os.getenv("CLIENT_ID", "desktop_client_1")
 LOCAL_DATA_DIR = os.getenv("LOCAL_DATA_DIR", r"D:\Skin Cancer Dataset")
 LOCAL_METADATA = os.getenv("LOCAL_METADATA", r"D:\Skin Cancer Dataset\HAM10000_metadata.csv")
@@ -42,9 +43,24 @@ SYNC_INTERVAL = int(os.getenv("SYNC_INTERVAL_SECONDS", 3600))  # check server ev
 
 WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Singletons ────────────────────────────────────────────────────────────────
-local_model = SkinCancerModel()
-scheduler = TrainingScheduler()
+# ── Lazy singletons (Flask starts immediately; model loads on first use) ───────
+_local_model = None
+_scheduler   = None
+
+def get_model():
+    """Return shared SkinCancerModel, initializing it only on first call."""
+    global _local_model
+    if _local_model is None:
+        logger.info("[lazy] Loading SkinCancerModel (EfficientNet-B0)…")
+        _local_model = SkinCancerModel()
+        logger.info("[lazy] Model ready")
+    return _local_model
+
+def get_scheduler():
+    global _scheduler
+    if _scheduler is None:
+        _scheduler = TrainingScheduler()
+    return _scheduler
 
 _known_server_round = 0  # last round we synced from server
 
@@ -65,13 +81,13 @@ def _download_global_model() -> bool:
             logger.info("Local model is already up to date (round %d)", _known_server_round)
             return False
 
-        logger.info("Downloading global model (round %d → %d)...", _known_server_round, server_round)
+        logger.info("Downloading global model (round %d → %d)…", _known_server_round, server_round)
         resp = requests.get(f"{FL_SERVER_URL}/api/model/weights", timeout=60)
         payload = resp.json()
 
         raw = base64.b64decode(payload["weights_b64"])
         state_dict = torch.load(io.BytesIO(raw), map_location="cpu")
-        local_model.set_state_dict(state_dict)
+        get_model().set_state_dict(state_dict)
 
         # Persist locally so we survive restarts without re-downloading
         _save_local_checkpoint(server_round, state_dict)
@@ -98,7 +114,7 @@ def _load_latest_local_checkpoint():
     if not files:
         return
     state_dict = torch.load(files[-1], map_location="cpu")
-    local_model.set_state_dict(state_dict)
+    get_model().set_state_dict(state_dict)   # triggers lazy load
     logger.info("Loaded local checkpoint %s", files[-1])
 
 
@@ -152,7 +168,7 @@ def _sync_once():
     global _known_server_round
     updated = _download_global_model()
 
-    if scheduler.should_train():
+    if get_scheduler().should_train():
         logger.info("Scheduler: OK to train")
         _run_local_training()
     else:
@@ -164,7 +180,7 @@ def _run_local_training():
     global _known_server_round
     try:
         trainer = LocalTrainer(
-            model=local_model,
+            model=get_model(),
             data_dir=LOCAL_DATA_DIR,
             metadata_path=LOCAL_METADATA,
         )
@@ -174,7 +190,7 @@ def _run_local_training():
             return
 
         trainer.train(epochs=int(os.getenv("LOCAL_EPOCHS", 1)))
-        state_dict = local_model.get_state_dict()
+        state_dict = get_model().get_state_dict()
 
         success = _upload_weights(state_dict, num_samples, round_num=_known_server_round + 1)
         if not success:
@@ -238,7 +254,7 @@ def local_predict():
     file = request.files["image"]
     try:
         img = Image.open(io.BytesIO(file.read())).convert("RGB")
-        result = local_model.predict(img)
+        result = get_model().predict(img)    # triggers lazy load if not yet loaded
         return jsonify({
             "success": True,
             "inference_mode": "local",
@@ -273,7 +289,7 @@ def status():
         "client_id": CLIENT_ID,
         "synced_round": _known_server_round,
         "fl_server": FL_SERVER_URL,
-        "training_allowed": scheduler.should_train(),
+        "training_allowed": get_scheduler().should_train(),
         "data_dir": LOCAL_DATA_DIR,
     })
 

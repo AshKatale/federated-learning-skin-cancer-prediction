@@ -6,7 +6,7 @@
  *
  * Two Python execution paths:
  *   A) Direct spawn: trainModel, runPrediction  (child_process.spawn)
- *   B) HTTP proxy:   fl-sync, fl-status etc.   (axios → Flask FL client on :7000)
+ *   B) HTTP proxy:   fl-sync, fl-status etc.   (axios → Flask FL client on :6000)
  */
 
 'use strict';
@@ -484,6 +484,7 @@ function createWindow(ip) {
 // ── App lifecycle ────────────────────────────────────────────────────────────
 
 app.on('ready', async () => {
+  // ── 1. Open the window FIRST — spawn failures must NEVER block the UI ─────
   if (isDev) {
     console.log(`[Electron] Waiting for React dev server on :${REACT_PORT}…`);
     const ip = await waitForPort(REACT_PORT);
@@ -492,6 +493,49 @@ app.on('ready', async () => {
     createWindow(null);
   }
   buildMenu();
+
+  // ── 2. Auto-start the Flask FL client (non-critical; errors are logged) ────
+  try {
+    const python       = getPython();
+    const clientScript = path.join(FL_CLIENT_DIR, 'client.py');
+    if (!fs.existsSync(clientScript)) {
+      console.warn('[Electron] client.py not found — FL sync/status will be unavailable');
+    } else {
+      console.log(`[Electron] Starting FL client on port ${FL_CLIENT_PORT}…`);
+      flClientProc = spawn(python, [clientScript], {
+        cwd: FL_CLIENT_DIR,
+        env: {
+          ...getPythonEnv(),
+          FL_CLIENT_PORT: String(FL_CLIENT_PORT),
+          FL_SERVER_URL:  'http://127.0.0.1:6000',  // fl-server default port
+        },
+      });
+      flClientProc.stdout.on('data', (d) =>
+        d.toString().split('\n').filter(Boolean).forEach((l) => console.log('[FL-Client]', l))
+      );
+      flClientProc.stderr.on('data', (d) =>
+        d.toString().split('\n').filter(Boolean).forEach((l) => console.warn('[FL-Client stderr]', l))
+      );
+      flClientProc.on('close', (code) => {
+        console.log(`[FL-Client] exited (code ${code})`);
+        flClientProc = null;
+      });
+      flClientProc.on('error', (err) => {
+        console.error('[FL-Client] Failed to start:', err.message);
+        flClientProc = null;
+      });
+    }
+  } catch (e) {
+    console.error('[Electron] FL client spawn error (non-fatal):', e.message);
+  }
+});
+
+app.on('before-quit', () => {
+  if (flClientProc && !flClientProc.killed) {
+    console.log('[Electron] Killing FL client process…');
+    flClientProc.kill('SIGTERM');
+    flClientProc = null;
+  }
 });
 
 app.on('window-all-closed', () => {
@@ -532,7 +576,7 @@ ipcMain.handle('train-model', async (_event, opts = {}) => {
     const dataDir  = opts.dataDir  || process.env.LOCAL_DATA_DIR || 'D:\\Skin Cancer Dataset';
     const clientId = opts.clientId || '1';
     const epochs   = String(opts.epochs || 1);
-    const server   = opts.server   || '127.0.0.1:8080';
+    const server   = opts.server   || '127.0.0.1:6000';  // must match fl-server port
     const device   = opts.device   || 'cpu';  // NEW: 'cpu' or 'cuda'
 
     const pyEnv = getPythonEnv();
@@ -685,7 +729,7 @@ ipcMain.handle('select-dataset-folder', async () => {
   return { canceled: false, path: folderPath, fl_response: null };
 });
 
-// ── 6. FL-client HTTP proxy handlers (Flask on :7000) ───────────────────────
+// ── 6. FL-client HTTP proxy handlers (Flask on :5000) ───────────────────────
 
 const flProxy = (method, endpoint, body = null) => async () => {
   if (!axios) return { error: 'axios not available' };

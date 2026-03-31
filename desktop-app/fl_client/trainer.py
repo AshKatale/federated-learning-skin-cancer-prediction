@@ -92,6 +92,10 @@ class LocalTrainer:
         optimizer = optim.Adam(net.parameters(), lr=lr)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2)
 
+        final_loss = 0.0
+        final_acc = 0.0
+        total_samples = 0
+
         for epoch in range(epochs):
             total_loss, correct, total = 0.0, 0, 0
             for x, y in loader:
@@ -112,3 +116,8 @@ class LocalTrainer:
             logger.info(
                 "[EPOCH %d/%d] loss=%.4f acc=%.2f%%", epoch + 1, epochs, avg_loss, acc
             )
+            final_loss = avg_loss
+            final_acc = acc
+            total_samples = total
+
+        return final_loss, final_acc, total_samples

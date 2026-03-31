@@ -115,8 +115,8 @@ def main():
         sys.exit(1)
 
     try:
-        from skin_cancer_model import SkinCancerModel
-        from fl_data_loader     import FLDataLoader
+        from model import SkinCancerModel, TRAIN_TRANSFORM
+        from trainer import LocalTrainer
         log('[FL Training] FL modules imported OK')
     except ImportError as e:
         log(f'[FL Training] ERROR: Cannot import FL modules: {e}')
@@ -127,8 +127,11 @@ def main():
     # ── Load model ────────────────────────────────────────────────────────────
     try:
         log('[FL Training] Loading EfficientNet model…')
-        model_wrapper = SkinCancerModel(model_path=args.model, device=device)
-        model = model_wrapper.model
+        model_wrapper = SkinCancerModel(device=device)
+        if args.model and os.path.exists(args.model):
+            model_wrapper.load_weights(args.model)
+            log(f'[FL Training] Loaded weights from {args.model}')
+        model = model_wrapper.net
         model.to(device)
         log('[FL Training] Model ready')
     except Exception as e:
@@ -162,16 +165,12 @@ def main():
         log(f'[FL Training] Metadata found: {metadata_path}')
         log(f'[FL Training] Loading client data (client_id={args.client_id})…')
 
-        X_train, y_train, X_val, y_val = FLDataLoader.load_client_data(
-            client_id=args.client_id,
-            dataset_path=image_dir,          # the actual selected images folder
-            metadata_path=metadata_path,
-            transform_fn=model_wrapper.get_transforms,
-            samples_per_client=999999,       # use ALL images in selected folder
-        )
-        log(f'[FL Training] Data loaded — train={len(X_train)}, val={len(y_val)}')
+        # Use LocalTrainer to prepare data
+        trainer = LocalTrainer(model_wrapper, image_dir, metadata_path)
+        num_samples = trainer.prepare_data(samples_per_class=999999)  # use ALL images
+        log(f'[FL Training] Data loaded — {num_samples} samples')
 
-        if len(X_train) == 0:
+        if num_samples == 0:
             log('[FL Training] ERROR: No training samples found. Check dataset path.')
             result = {'success': False, 'error': 'No training data'}
             print(json.dumps(result), flush=True)
@@ -184,54 +183,15 @@ def main():
 
     # ── Train ─────────────────────────────────────────────────────────────────
     try:
-        import torch.optim as optim
-        import torch.nn as nn
-        import numpy as np
-
-        optimizer = optim.Adam(model.parameters(), lr=args.lr)
-        criterion = nn.CrossEntropyLoss()
-
-        # Convert to tensors if needed
-        if not isinstance(X_train, torch.Tensor):
-            X_train = torch.tensor(np.array(X_train), dtype=torch.float32)
-            y_train = torch.tensor(np.array(y_train), dtype=torch.long)
-
-        dataset = torch.utils.data.TensorDataset(X_train, y_train)
-        loader  = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
-
-        for epoch in range(1, args.epochs + 1):
-            model.train()
-            total_loss, correct, total = 0.0, 0, 0
-
-            for batch_idx, (images, labels) in enumerate(loader):
-                images, labels = images.to(device), labels.to(device)
-                optimizer.zero_grad()
-                outputs = model(images)
-                loss    = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
-
-                total_loss += loss.item()
-                _, predicted = outputs.max(1)
-                correct += predicted.eq(labels).sum().item()
-                total   += labels.size(0)
-
-                if (batch_idx + 1) % 5 == 0:
-                    log(f'[FL Training] Epoch {epoch}/{args.epochs} '
-                        f'Batch {batch_idx+1}/{len(loader)} '
-                        f'Loss={total_loss/(batch_idx+1):.4f} '
-                        f'Acc={100.*correct/total:.1f}%')
-
-            acc  = 100. * correct / total if total > 0 else 0
-            loss_avg = total_loss / len(loader) if len(loader) > 0 else 0
-            log(f'[FL Training] ✅ Epoch {epoch}/{args.epochs} complete — '
-                f'Loss={loss_avg:.4f} Acc={acc:.1f}%')
+        log(f'[FL Training] Starting training for {args.epochs} epochs…')
+        loss_avg, acc, num_samples = trainer.train(epochs=args.epochs, batch_size=16, lr=args.lr)
+        log(f'[FL Training] ✅ Training complete — Loss={loss_avg:.4f} Acc={acc:.1f}%')
 
         # ── Save local weights ────────────────────────────────────────────────
         weights_dir = os.path.join(SCRIPT_DIR, 'local_weights')
         os.makedirs(weights_dir, exist_ok=True)
         checkpoint_path = os.path.join(weights_dir, f'client_{args.client_id}_trained.pt')
-        torch.save(model.state_dict(), checkpoint_path)
+        model_wrapper.save_weights(checkpoint_path)
         log(f'[FL Training] Weights saved → {checkpoint_path}')
 
         result = {
@@ -240,7 +200,7 @@ def main():
             'epochs':       args.epochs,
             'final_loss':   round(loss_avg, 4),
             'final_acc':    round(acc, 2),
-            'samples':      total,
+            'samples':      num_samples,
             'checkpoint':   checkpoint_path,
         }
         log('[FL Training] 🎉 Training complete')
