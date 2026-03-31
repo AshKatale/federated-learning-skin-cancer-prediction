@@ -29,16 +29,26 @@ const initiateRound = async (req, res) => {
     const last = await FederatedLearning.findOne({}).sort({ roundNumber: -1 });
     const nextRound = last ? last.roundNumber + 1 : 1;
 
+    // Get the previous round's global model version or start with 1.0.0
+    const previousRound = last ? last.globalModelVersion : '0.0.0';
+    const versionParts = previousRound.split('.').map(Number);
+    versionParts[1]++; // Increment minor version
+    const newVersion = versionParts.join('.');
+
     const round = await FederatedLearning.create({
       roundNumber: nextRound,
-      status: 'active',
+      status: 'initiated',
+      globalModelVersion: newVersion,
       roundStartTime: new Date(),
-      clientList: clientList.map((id) => ({ clientId: id, status: 'pending' })),
-      participatingClients: 0,
+      clientList: clientList.map((id) => ({ clientId: id, status: 'invited' })),
+      participatingClients: clientList.length,
+      totalClients: clientList.length,
+      aggregationMethod: 'FedAvg'
     });
 
     res.status(201).json({ success: true, round });
   } catch (e) {
+    console.error('Error initiating round:', e);
     res.status(500).json({ success: false, message: e.message });
   }
 };
@@ -54,7 +64,18 @@ const getAllRounds = async (req, res) => {
         .limit(parseInt(limit)),
       FederatedLearning.countDocuments(filter),
     ]);
-    res.json({ success: true, rounds, pagination: { page: +page, limit: +limit, total } });
+    res.json({
+      success: true,
+      data: {
+        rounds,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      }
+    });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
   }
@@ -97,6 +118,10 @@ const getAnalytics = async (req, res) => {
       accuracyTrend: rounds.map((r) => ({
         round: r.roundNumber,
         accuracy: r.globalModelPerformance?.accuracy || 0,
+      })),
+      lossTrend: rounds.map((r) => ({
+        round: r.roundNumber,
+        loss: r.globalModelPerformance?.loss || 0,
       })),
       clientParticipation: rounds.map((r) => ({
         round: r.roundNumber,

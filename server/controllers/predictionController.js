@@ -68,9 +68,23 @@ const submitPrediction = async (req, res) => {
     // Save prediction
     await prediction.save();
 
+    // Flatten prediction object for frontend
+    const flatPrediction = {
+      ...prediction.toObject(),
+      className: prediction.prediction.className,
+      class_name: prediction.prediction.className,
+      classId: prediction.prediction.classId,
+      class_id: prediction.prediction.classId,
+      confidence: prediction.prediction.confidence,
+      allProbabilities: prediction.prediction.allProbabilities,
+      all_probabilities: prediction.prediction.allProbabilities,
+      gradcamData: prediction.gradcamData,
+      gradcamUrl: prediction.gradcamUrl
+    };
+
     res.status(201).json({
       success: true,
-      prediction: prediction,
+      prediction: flatPrediction,
       message: 'Prediction completed successfully'
     });
   } catch (error) {
@@ -110,13 +124,30 @@ const getPredictionHistory = async (req, res) => {
     // Get total count
     const total = await Prediction.countDocuments(filter);
 
+    // Flatten prediction objects for frontend
+    const flatPredictions = predictions.map(pred => ({
+      ...pred.toObject(),
+      className: pred.prediction.className,
+      class_name: pred.prediction.className,
+      classId: pred.prediction.classId,
+      class_id: pred.prediction.classId,
+      confidence: pred.prediction.confidence,
+      allProbabilities: pred.prediction.allProbabilities,
+      all_probabilities: pred.prediction.allProbabilities,
+      gradcamData: pred.gradcamData,
+      gradcamUrl: pred.gradcamUrl
+    }));
+
     res.status(200).json({
       success: true,
-      predictions,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
+      data: {
+        predictions: flatPredictions,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          pages: Math.ceil(total / limit)
+        },
         pages: Math.ceil(total / limit)
       }
     });
@@ -153,9 +184,23 @@ const getPredictionById = async (req, res) => {
       });
     }
 
+    // Flatten prediction object for frontend
+    const flatPrediction = {
+      ...prediction.toObject(),
+      className: prediction.prediction.className,
+      class_name: prediction.prediction.className,
+      classId: prediction.prediction.classId,
+      class_id: prediction.prediction.classId,
+      confidence: prediction.prediction.confidence,
+      allProbabilities: prediction.prediction.allProbabilities,
+      all_probabilities: prediction.prediction.allProbabilities,
+      gradcamData: prediction.gradcamData,
+      gradcamUrl: prediction.gradcamUrl
+    };
+
     res.status(200).json({
       success: true,
-      prediction
+      prediction: flatPrediction
     });
   } catch (error) {
     res.status(500).json({
@@ -262,11 +307,12 @@ const getPredictionStats = async (req, res) => {
     const predictions = await Prediction.find({ userId: req.user.id });
 
     const stats = {
+      totalPredictions: predictions.length,
       total: predictions.length,
       byRiskLevel: {
-        Low: predictions.filter(p => p.riskLevel === 'Low').length,
-        Medium: predictions.filter(p => p.riskLevel === 'Medium').length,
-        High: predictions.filter(p => p.riskLevel === 'High').length
+        Low: { count: predictions.filter(p => p.riskLevel === 'Low').length },
+        Medium: { count: predictions.filter(p => p.riskLevel === 'Medium').length },
+        High: { count: predictions.filter(p => p.riskLevel === 'High').length }
       },
       byClass: {
         akiec: predictions.filter(p => p.prediction.className === 'akiec').length,
@@ -278,7 +324,7 @@ const getPredictionStats = async (req, res) => {
         vasc: predictions.filter(p => p.prediction.className === 'vasc').length
       },
       averageConfidence: predictions.length > 0 
-        ? (predictions.reduce((acc, p) => acc + p.prediction.confidence, 0) / predictions.length).toFixed(4)
+        ? parseFloat((predictions.reduce((acc, p) => acc + p.prediction.confidence, 0) / predictions.length).toFixed(4))
         : 0,
       averageProcessingTime: predictions.length > 0 
         ? Math.round(predictions.reduce((acc, p) => acc + p.processingTime, 0) / predictions.length)

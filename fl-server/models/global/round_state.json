@@ -1,5 +1,5 @@
 {
-  "current_round": 1,
-  "round_start": 1774883298.225378,
-  "last_model_path": null
+  "current_round": 3,
+  "round_start": 1774965354.6782632,
+  "last_model_path": "models\\global\\global_model_round_1.pt"
 }

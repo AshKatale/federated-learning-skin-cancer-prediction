@@ -36,9 +36,10 @@ const FL_CLIENT_DIR= path.join(__dirname, 'fl_client');
 // Dev mode: dist not built yet
 const isDev = !fs.existsSync(CLIENT_DIST);
 
-let mainWindow   = null;
-let flClientProc = null;  // Flask FL client child process
-let trainProc    = null;  // Active training Python process
+let mainWindow     = null;
+let flClientProc   = null;  // Flask FL client child process
+let trainProc      = null;  // Active training Python process
+let cudaInstallProc = null; // CUDA installation Python process (for cancellation)
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -92,6 +93,304 @@ function getPython() {
   console.warn('[Electron] WARNING: venv not found. Falling back to system Python.');
   console.warn(`[Electron] Expected venv at: ${path.join(PROJECT_ROOT, 'venv')}`);
   return 'python';
+}
+
+/**
+ * Check if PyTorch with CUDA support is installed
+ * Also checks if CUDA is available on the system
+ * Returns: { installed: boolean, version: string, cuda_available: boolean, device: string }
+ */
+async function checkCudaStatus() {
+  return new Promise(async (resolve) => {
+    const python = getPython();
+    const checkScript = `
+import torch
+import sys
+
+# Check torch installation
+torch_version = torch.__version__
+cuda_available = torch.cuda.is_available()
+device_name = None
+
+if cuda_available:
+    try:
+        device_name = torch.cuda.get_device_name(0)
+        cuda_version = torch.version.cuda
+    except:
+        cuda_version = "Unknown"
+else:
+    cuda_version = "Not available"
+
+print(f"torch_version:{torch_version}")
+print(f"cuda_available:{cuda_available}")
+print(f"cuda_version:{cuda_version}")
+if device_name:
+    print(f"cuda_device:{device_name}")
+
+sys.exit(0)
+`.trim();
+
+    const proc = spawn(python, ['-c', checkScript], {
+      env: getPythonEnv(),
+    });
+
+    let output = '';
+    let error = '';
+
+    proc.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+
+    proc.stderr.on('data', (data) => {
+      error += data.toString();
+    });
+
+    proc.on('close', async (code) => {
+      // Await system CUDA check (for serializable value)
+      const systemCudaAvailable = await checkSystemCuda();
+
+      if (code !== 0) {
+        console.log('[CUDA Check] PyTorch not installed or error occurred');
+        if (error) console.log('[CUDA Check] Error:', error);
+        return resolve({
+          installed: false,
+          version: null,
+          cuda_available: false,
+          device: null,
+          system_cuda_available: systemCudaAvailable,
+        });
+      }
+
+      const lines = output.split('\n');
+      const versionLine = lines.find((l) => l.startsWith('torch_version:'));
+      const cudaLine = lines.find((l) => l.startsWith('cuda_available:'));
+      const cudaVersionLine = lines.find((l) => l.startsWith('cuda_version:'));
+      const deviceLine = lines.find((l) => l.startsWith('cuda_device:'));
+
+      const version = versionLine ? versionLine.split(':')[1].trim() : null;
+      const cudaAvailable = cudaLine ? cudaLine.includes('True') : false;
+      const cudaVersion = cudaVersionLine ? cudaVersionLine.split(':')[1].trim() : null;
+      const device = deviceLine ? deviceLine.split(':')[1].trim() : null;
+
+      console.log(
+        `[CUDA Check] Torch: ${version}, CUDA: ${cudaAvailable}, ` +
+        `CUDA Version: ${cudaVersion}, Device: ${device}`
+      );
+
+      resolve({
+        installed: true,
+        version,
+        cuda_available: cudaAvailable,
+        cuda_version: cudaVersion,
+        device,
+        system_cuda_available: systemCudaAvailable,
+      });
+    });
+
+    proc.on('error', async (err) => {
+      // Await system CUDA check (for serializable value)
+      const systemCudaAvailable = await checkSystemCuda();
+
+      console.error('[CUDA Check] Error:', err.message);
+      resolve({
+        installed: false,
+        version: null,
+        cuda_available: false,
+        device: null,
+        system_cuda_available: systemCudaAvailable,
+      });
+    });
+  });
+}
+
+/**
+ * Check if CUDA drivers/toolkit are installed on the system
+ * Uses nvidia-smi to detect CUDA availability
+ */
+function checkSystemCuda() {
+  return new Promise((resolve) => {
+    try {
+      const proc = exec('nvidia-smi --query-gpu=name --format=csv,noheader', (error, stdout) => {
+        if (error) {
+          console.log('[System CUDA] nvidia-smi not found - CUDA drivers not installed');
+          resolve(false);
+        } else {
+          const gpuNames = stdout.trim().split('\n');
+          const hasGpu = gpuNames.some(name => name.length > 0);
+          if (hasGpu) {
+            console.log(`[System CUDA] Detected GPU(s): ${gpuNames.join(', ')}`);
+            resolve(true);
+          } else {
+            resolve(false);
+          }
+        }
+      });
+      // Timeout after 3 seconds
+      setTimeout(() => resolve(false), 3000);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * Install PyTorch with CUDA 12.1 support
+ * Streams installation progress to renderer via 'cuda-install-progress'
+ * Progress format: { status, downloaded, total, percentage, message }
+ */
+async function installCudaPyTorch() {
+  return new Promise((resolve) => {
+    // Prevent multiple simultaneous installations
+    if (cudaInstallProc) {
+      sendLog('cuda-install-log', '[Install] Installation already in progress');
+      return resolve({ success: false, error: 'Installation already in progress' });
+    }
+
+    const python = getPython();
+    const scriptPath = path.join(__dirname, 'install_cuda_pytorch.py');
+
+    sendLog('cuda-install-log', '[Install] Starting PyTorch CUDA 12.1 installation...');
+    sendLog('cuda-install-log', '[Install] Estimated size: ~2.4 GB (one-time download)');
+    sendLog('cuda-install-log', '[Install] This may take 5-15 minutes depending on connection speed');
+
+    const proc = spawn(python, [scriptPath], {
+      env: getPythonEnv(),
+    });
+
+    cudaInstallProc = proc; // Store for cancellation
+
+    let output = '';
+    let totalSize = 0;
+    let downloadedSize = 0;
+
+    // Parse progress JSON from Python script
+    proc.stdout.on('data', (data) => {
+      const lines = data.toString().split('\n');
+      for (const line of lines) {
+        if (!line.trim()) continue;
+
+        try {
+          // Try to parse as JSON progress update
+          const json = JSON.parse(line);
+          if (json.status) {
+            const { status, downloaded, total, percentage, message } = json;
+
+            sendLog('cuda-install-log', `[${status}] ${message}`);
+
+            // Send progress event with all details
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('cuda-progress', {
+                status,
+                downloaded: downloaded || 0,
+                total: total || 0,
+                percentage: percentage || 0,
+                message: message || '',
+              });
+            }
+
+            totalSize = total;
+            downloadedSize = downloaded;
+          }
+        } catch {
+          // Not JSON - regular log line
+          if (line.trim()) {
+            sendLog('cuda-install-log', `[pip] ${line}`);
+          }
+        }
+      }
+    });
+
+    proc.stderr.on('data', (data) => {
+      const line = data.toString().trim();
+      if (line) {
+        sendLog('cuda-install-log', `[error] ${line}`);
+      }
+    });
+
+    proc.on('close', (code) => {
+      cudaInstallProc = null; // Clear process reference
+
+      if (code === 0) {
+        sendLog('cuda-install-log', '[Install] ✅ PyTorch CUDA 12.1 installed successfully!');
+        sendLog('cuda-install-log', '[Install] You can now use GPU acceleration for training');
+
+        // Send final progress
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('cuda-progress', {
+            status: 'completed',
+            downloaded: totalSize,
+            total: totalSize,
+            percentage: 100,
+            message: 'Installation completed successfully',
+          });
+        }
+
+        resolve({ success: true });
+      } else {
+        sendLog('cuda-install-log', `[Install] ❌ Installation failed (exit code: ${code})`);
+
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('cuda-progress', {
+            status: 'error',
+            percentage: 0,
+            message: 'Installation failed',
+          });
+        }
+
+        resolve({ success: false, error: 'Installation failed with exit code ' + code });
+      }
+    });
+
+    proc.on('error', (err) => {
+      cudaInstallProc = null;
+      sendLog('cuda-install-log', `[Install] ❌ Process error: ${err.message}`);
+
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('cuda-progress', {
+          status: 'error',
+          percentage: 0,
+          message: 'Process error: ' + err.message,
+        });
+      }
+
+      resolve({ success: false, error: err.message });
+    });
+  });
+}
+
+/**
+ * Cancel the ongoing CUDA installation
+ */
+function cancelCudaInstall() {
+  if (cudaInstallProc) {
+    console.log('[CUDA] Cancelling installation...');
+    try {
+      // Kill the process tree (including pip)
+      if (process.platform === 'win32') {
+        exec(`taskkill /PID ${cudaInstallProc.pid} /T /F`, (error) => {
+          if (error) console.error('[CUDA] Error killing process:', error);
+        });
+      } else {
+        process.kill(-cudaInstallProc.pid); // Kill process group on Unix
+      }
+    } catch (e) {
+      cudaInstallProc.kill('SIGTERM');
+    }
+    cudaInstallProc = null;
+
+    sendLog('cuda-install-log', '[Install] ❌ Installation cancelled by user');
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('cuda-progress', {
+        status: 'cancelled',
+        percentage: 0,
+        message: 'Installation cancelled',
+      });
+    }
+
+    return { cancelled: true };
+  }
+  return { cancelled: false, error: 'No installation in progress' };
 }
 
 /**
@@ -234,9 +533,11 @@ ipcMain.handle('train-model', async (_event, opts = {}) => {
     const clientId = opts.clientId || '1';
     const epochs   = String(opts.epochs || 1);
     const server   = opts.server   || '127.0.0.1:8080';
+    const device   = opts.device   || 'cpu';  // NEW: 'cpu' or 'cuda'
 
     const pyEnv = getPythonEnv();
     console.log(`[IPC:train-model] python=${python}`);
+    console.log(`[IPC:train-model] device=${device}`);
     console.log(`[IPC:train-model] PYTHONPATH=${pyEnv.PYTHONPATH}`);
 
     const logs = [];
@@ -246,6 +547,7 @@ ipcMain.handle('train-model', async (_event, opts = {}) => {
       '--data-dir',  dataDir,
       '--epochs',    epochs,
       '--server',    server,
+      '--device',    device,  // NEW: Pass device to training script
     ], {
       cwd: FL_CLIENT_DIR,
       env: pyEnv,
@@ -285,6 +587,23 @@ ipcMain.handle('kill-training', () => {
     return { killed: true };
   }
   return { killed: false };
+});
+
+// ── CUDA Management ──────────────────────────────────────────────────────────
+
+/** Check if CUDA PyTorch is installed */
+ipcMain.handle('check-cuda-status', async () => {
+  return await checkCudaStatus();
+});
+
+/** Install PyTorch with CUDA support (streams logs via 'cuda-install-log') */
+ipcMain.handle('install-cuda-pytorch', async () => {
+  return await installCudaPyTorch();
+});
+
+/** Cancel ongoing CUDA installation */
+ipcMain.handle('cancel-cuda-install', () => {
+  return cancelCudaInstall();
 });
 
 // ── 3. Run prediction — spawns inference_runner.py ───────────────────────────

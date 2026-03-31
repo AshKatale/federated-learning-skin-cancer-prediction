@@ -29,6 +29,9 @@ const VALID_INVOKE = new Set([
   'open-devtools',
   'read-file',
   'list-dataset',
+  'check-cuda-status',
+  'install-cuda-pytorch',
+  'cancel-cuda-install',
 ]);
 
 // ── Whitelisted listener channels (main → renderer) ──────────────────────────
@@ -37,6 +40,8 @@ const VALID_ON = new Set([
   'trigger-sync',
   'trigger-train',
   'dataset-changed',
+  'cuda-install-log',
+  'cuda-progress',
 ]);
 
 /** Safe invoke — rejects unknown channels immediately. */
@@ -126,6 +131,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Menu: dataset folder was changed. */
   onDatasetChanged:(cb) => safeOn('dataset-changed', cb),
 
+  // ── GPU / CUDA management ────────────────────────────────────────────────
+
+  /** Check if CUDA PyTorch is installed. Returns { cuda_available, version, device } */
+  checkCudaStatus: () => safeInvoke('check-cuda-status'),
+
+  /** Install PyTorch with CUDA 12.1 support. Returns { success, error } */
+  installCudaPyTorch: () => safeInvoke('install-cuda-pytorch'),
+
+  /** Stream CUDA installation logs. Returns cleanup fn. */
+  onCudaInstallLog: (cb) => safeOn('cuda-install-log', cb),
+  /** Stream CUDA progress updates (status, percentage, downloaded, total, message). Returns cleanup fn. */
+  onCudaProgress: (cb) => safeOn('cuda-progress', cb),
+
+  /** Cancel ongoing CUDA installation. Returns { cancelled: boolean } */
+  cancelCudaInstall: () => safeInvoke('cancel-cuda-install'),
   // ── Dev tools ────────────────────────────────────────────────────────────
   openDevTools: () => safeInvoke('open-devtools'),
 });

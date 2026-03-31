@@ -13,7 +13,6 @@ const Prediction = require('../models/Prediction');
 
 const ML_SERVICE_URL = process.env.ML_SERVICE_URL || 'http://localhost:5000';
 const ML_PATH = path.join(__dirname, '../../ml-model');
-const FL_PATH = path.join(__dirname, '../../federated-learning'); // Federated learning aggregator
 const MODELS_DIR = path.join(ML_PATH, 'models');
 
 // Ensure models directory exists
@@ -127,45 +126,11 @@ const getTrainingStatus = async (req, res) => {
  * @access Private/Admin
  */
 const aggregateModels = async (req, res) => {
-  try {
-    const { modelVersions = [], outputVersion } = req.body;
-
-    if (modelVersions.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide at least one model version to aggregate'
-      });
-    }
-
-    console.log(`[ML] Aggregating ${modelVersions.length} models...`);
-
-    // Create aggregation record
-    const aggregateRecord = await MLModel.create({
-      modelName: 'aggregated_skin_cancer_model',
-      version: outputVersion || `aggregated_v${Date.now()}`,
-      status: 'aggregating',
-      aggregatedFrom: modelVersions,
-      startTime: new Date()
-    });
-
-    // Start aggregation in background
-    _performModelAggregation(aggregateRecord._id, modelVersions);
-
-    res.json({
-      success: true,
-      message: 'Model aggregation initiated',
-      aggregation_id: aggregateRecord._id,
-      output_version: aggregateRecord.version,
-      input_models: modelVersions.length
-    });
-  } catch (error) {
-    console.error('[ML] Aggregation error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to aggregate models',
-      error: error.message
-    });
-  }
+  res.status(501).json({
+    success: false,
+    message: 'Model aggregation endpoint is not implemented',
+    note: 'Use federated learning server at fl-server/ for aggregation operations'
+  });
 };
 
 /**
@@ -416,102 +381,10 @@ async function _triggerMLTraining(
 }
 
 /**
- * Perform federated model aggregation (average weights from multiple models)
- * Uses federated-learning/model_aggregator.py for unified model combining
+ * Model Aggregation - DEPRECATED
+ * The federated-learning folder has been removed.
+ * For model aggregation, use the federated learning server at fl-server/
  */
-async function _performModelAggregation(recordId, modelVersions) {
-  try {
-    console.log(`[ML] Starting model aggregation for: ${modelVersions.join(', ')}`);
-
-    // Fetch completed models
-    const models = await MLModel.find({
-      version: { $in: modelVersions },
-      status: 'completed'
-    });
-
-    if (models.length === 0) {
-      throw new Error('No completed models found to aggregate');
-    }
-
-    // Collect valid model paths
-    const modelPaths = models.map(m => m.modelPath).filter(p => p && fs.existsSync(p));
-
-    if (modelPaths.length === 0) {
-      throw new Error('No model files found');
-    }
-
-    console.log(`[ML] Aggregating ${modelPaths.length} model weights...`);
-
-    const outputPath = path.join(MODELS_DIR, `aggregated_v${Date.now()}.pth`);
-
-    // Spawn aggregation script from federated-learning folder with unbuffered output
-    const aggregateProcess = spawn('python', ['-u', 'model_aggregator.py', ...modelPaths, outputPath], {
-      cwd: FL_PATH,
-      env: {
-        ...process.env,
-        PYTHONUNBUFFERED: '1'
-      },
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    aggregateProcess.stdout.on('data', (data) => {
-      const output = data.toString().trim();
-      console.log(`[ML Aggregate] ${output}`);
-    });
-
-    aggregateProcess.stderr.on('data', (data) => {
-      console.log(`[ML Aggregate Error] ${data}`);
-    });
-
-    aggregateProcess.on('close', async (code) => {
-      if (code === 0) {
-        console.log(`[ML] Model aggregation completed`);
-
-        // Verify aggregated model was created
-        if (!fs.existsSync(outputPath)) {
-          throw new Error(`Aggregated model not found at ${outputPath}`);
-        }
-
-        // Calculate average accuracy
-        const avgAccuracy = models.reduce((sum, m) => sum + (m.accuracy || 0), 0) / models.length;
-
-        await MLModel.findByIdAndUpdate(recordId, {
-          status: 'completed',
-          modelPath: outputPath,
-          endTime: new Date(),
-          isAggregated: true,
-          accuracy: avgAccuracy,
-          metrics: {
-            aggregatedModels: models.length,
-            averageAccuracy: avgAccuracy,
-            aggregationTime: new Date()
-          }
-        });
-
-        // Auto-activate if no active model exists
-        const activeModel = await MLModel.findOne({ status: 'active' });
-        if (!activeModel) {
-          await MLModel.findByIdAndUpdate(recordId, {
-            status: 'active',
-            activatedAt: new Date()
-          });
-          console.log('[ML] Aggregated model automatically activated');
-        }
-      } else {
-        console.error(`[ML] Aggregation failed with code ${code}`);
-        await MLModel.findByIdAndUpdate(recordId, {
-          status: 'failed'
-        });
-      }
-    });
-  } catch (error) {
-    console.error('[ML] Aggregation error:', error);
-    await MLModel.findByIdAndUpdate(recordId, {
-      status: 'failed',
-      error: error.message
-    });
-  }
-}
 
 /**
  * Automatically aggregate newly trained model with recent ones
@@ -544,7 +417,7 @@ async function _aggregateWithRecent(newModelId) {
         startTime: new Date()
       });
 
-      _performModelAggregation(aggregateRecord._id, modelsToAggregate);
+      console.log('[ML] Auto-aggregation skipped - use fl-server for aggregation');
     }
   } catch (error) {
     console.error('[ML] Auto-aggregation error:', error);

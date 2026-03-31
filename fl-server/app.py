@@ -227,6 +227,26 @@ def round_status():
     return jsonify(round_manager.status())
 
 
+@app.route("/api/round/aggregate", methods=["POST"])
+def trigger_aggregation():
+    """Manually trigger round aggregation immediately (admin endpoint)."""
+    try:
+        logger.info("[Admin] Manual aggregation requested")
+        _aggregate_and_advance()
+        return jsonify({
+            "success": True,
+            "message": "Aggregation completed",
+            "current_round": round_manager.current_round(),
+            "model_path": round_manager.latest_model_path()
+        }), 200
+    except Exception as e:
+        logger.error(f"Aggregation failed: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 if __name__ == "__main__":
     port = int(os.getenv("FL_SERVER_PORT", 6000))
     logger.info(f"FL Server starting on port {port}")

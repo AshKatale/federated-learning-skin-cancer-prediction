@@ -58,6 +58,31 @@ export default function PredictionResults({ prediction }) {
         </div>
       </div>
 
+      {/* Grad-CAM Visualization */}
+      {(prediction.gradcamData || prediction.gradcamUrl) && (
+        <div style={{ borderRadius: 'var(--radius)', overflow: 'hidden', backgroundColor: 'var(--bg)' }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-2)', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+            Model Attention Heatmap
+          </div>
+          <div style={{ padding: 16, display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 240, backgroundColor: 'var(--bg)' }}>
+            <img
+              src={prediction.gradcamData || prediction.gradcamUrl}
+              alt="Grad-CAM Heatmap"
+              style={{
+                maxWidth: '100%',
+                maxHeight: 240,
+                borderRadius: 8,
+                boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
+                objectFit: 'contain'
+              }}
+            />
+          </div>
+          <div style={{ fontSize: 11.5, color: 'var(--text-3)', padding: '0 16px 12px', fontStyle: 'italic' }}>
+            Shows the regions of the image that influenced the prediction
+          </div>
+        </div>
+      )}
+
       {/* All Probabilities */}
       {sortedProbs.length > 0 && (
         <div>

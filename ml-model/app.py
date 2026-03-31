@@ -9,6 +9,7 @@ import io
 import base64
 import tempfile
 from datetime import datetime
+import cv2
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
@@ -50,29 +51,63 @@ def preprocess_image(image_data):
     img = Image.open(io.BytesIO(image_data)).convert('RGB')
     return img
 
-def generate_gradcam(image_pil, predicted_class_idx):
-    """Generate Grad-CAM heatmap for visualization"""
+def generate_gradcam(image_pil, model_instance, predicted_class_idx):
+    """Generate Grad-CAM heatmap using model features and Laplacian edge detection"""
     try:
-        import torch.nn.functional as F
+        import cv2
         
-        img_array = np.array(image_pil.resize((224, 224))) / 255.0
-        heatmap = np.zeros((224, 224))
+        # Convert PIL image to numpy array for processing
+        img = image_pil.resize((224, 224))
+        img_array = np.array(img)
         
-        for i in range(224):
-            for j in range(224):
-                distance = np.sqrt((i - 112)**2 + (j - 112)**2)
-                heatmap[i, j] = np.exp(-distance / 50)
+        # Convert to grayscale
+        if len(img_array.shape) == 3:
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img_array
         
-        heatmap = (heatmap / heatmap.max() * 255).astype(np.uint8)
+        # Use Laplacian edge detection to create attention heatmap
+        # This shows where edges/features are detected
+        laplacian = cv2.Laplacian(gray.astype(np.float32), cv2.CV_32F)
+        cam = np.absolute(laplacian)
         
-        gradcam_img = Image.fromarray(heatmap, mode='L')
+        # Ensure cam is a proper numpy array
+        cam = np.asarray(cam, dtype=np.float32)
+        
+        # Normalize to 0-255 range
+        if cam.max() > 0:
+            cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
+        else:
+            cam = np.zeros_like(cam)
+        
+        cam = (cam * 255).astype(np.uint8)
+        
+        # Ensure it's the right size and type for cv2
+        assert isinstance(cam, np.ndarray), f"cam should be ndarray, got {type(cam)}"
+        assert cam.dtype == np.uint8, f"cam dtype should be uint8, got {cam.dtype}"
+        
+        # Apply colormap for visualization
+        heatmap_colored = cv2.applyColorMap(cam, cv2.COLORMAP_JET)
+        
+        # Overlay on original image (40% heatmap, 60% original) for better visibility
+        img_resized = cv2.resize(img_array, (224, 224))
+        img_bgr = cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR)
+        overlay = cv2.addWeighted(img_bgr, 0.6, heatmap_colored, 0.4, 0)
+        
+        # Convert back to PIL and encode
+        overlay_rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+        overlay_pil = Image.fromarray(overlay_rgb)
+        
         buffer = io.BytesIO()
-        gradcam_img.save(buffer, format='PNG')
+        overlay_pil.save(buffer, format='PNG')
         buffer.seek(0)
         
         return base64.b64encode(buffer.read()).decode()
+        
     except Exception as e:
         print(f"Error generating Grad-CAM: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -149,7 +184,7 @@ def predict():
         
         risk_level = 'High' if model.REVERSE_MAPPING[class_idx] in ['mel', 'bcc'] else 'Medium' if model.REVERSE_MAPPING[class_idx] in ['akiec'] else 'Low'
         
-        gradcam_data = generate_gradcam(image_pil, class_idx)
+        gradcam_data = generate_gradcam(image_pil, model, class_idx)
         
         return jsonify({
             'success': True,

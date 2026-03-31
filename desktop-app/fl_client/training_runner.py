@@ -44,6 +44,7 @@ parser.add_argument('--client-id',  default='1',                         help='C
 parser.add_argument('--data-dir',   default=r'D:\Skin Cancer Dataset',   help='Dataset root folder')
 parser.add_argument('--epochs',     default='1', type=int,               help='Local training epochs')
 parser.add_argument('--server',     default='127.0.0.1:8080',            help='FL server address host:port')
+parser.add_argument('--device',     default='cpu',                       help='Device to use: cpu or cuda')
 parser.add_argument('--model',      default=None,                        help='Path to initial model weights')
 parser.add_argument('--lr',         default='0.001', type=float,         help='Learning rate')
 args = parser.parse_args()
@@ -59,6 +60,7 @@ def main():
     log(f'[FL Training] Dataset: {args.data_dir}')
     log(f'[FL Training] Epochs:  {args.epochs}')
     log(f'[FL Training] Server:  {args.server}')
+    log(f'[FL Training] Device:  {args.device}')
 
     # ── Validate & normalize dataset path ────────────────────────────────────
     if not os.path.isdir(args.data_dir):
@@ -85,7 +87,20 @@ def main():
     try:
         import torch
         log(f'[FL Training] PyTorch {torch.__version__} loaded')
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        # Use requested device, validating CUDA availability
+        device = args.device.lower()
+        if device == 'cuda':
+            if torch.cuda.is_available():
+                log(f'[FL Training] GPU: {torch.cuda.get_device_name(0)}')
+                log(f'[FL Training] Using CUDA (fast training)')
+            else:
+                log(f'[FL Training] WARNING: CUDA requested but not available. Falling back to CPU.')
+                log(f'[FL Training] To use GPU, install: pip install torch --index-url https://download.pytorch.org/whl/cu121')
+                device = 'cpu'
+        else:
+            log(f'[FL Training] Using CPU (slower training)')
+        
         log(f'[FL Training] Device: {device}')
     except ImportError:
         log('[FL Training] ERROR: PyTorch not installed in the active Python environment.')

@@ -43,8 +43,35 @@ export default function FLControlPanel() {
   const [epochs,        setEpochs]        = useState(1);
   const [clientId,      setClientId]      = useState('1');
   const [panelTab,      setPanelTab]      = useState('train'); // 'train' | 'predict' | 'status'
+  const [device,        setDevice]        = useState('cpu');   // NEW: 'cpu' or 'cuda'
+  const [cudaStatus,    setCudaStatus]    = useState(null);    // NEW: CUDA availability info
+  const [showCudaModal, setShowCudaModal] = useState(false);   // NEW: CUDA install prompt
+  const [installingCuda, setInstallingCuda] = useState(false); // NEW: CUDA installation in progress
+  const [cudaLogs,      setCudaLogs]      = useState([]);      // NEW: CUDA install logs
+  const [cudaProgress,  setCudaProgress]  = useState(null);    // NEW: CUDA download progress { downloaded, total, percentage }
 
   const logsEndRef = useRef(null);
+
+  // ── Generate unique client ID on mount ─────────────────────────────────────
+  useEffect(() => {
+    // Generate unique ID from machine hostname + random ID
+    // This ensures each desktop app instance gets a unique client ID
+    const storedClientId = localStorage.getItem('fl_client_id');
+    
+    if (!storedClientId) {
+      // Generate new unique ID: hostname + random suffix
+      const hostname = window.electronAPI?.platform || 'client';
+      const randomSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
+      const newClientId = `${hostname}_${randomSuffix}`;
+      
+      localStorage.setItem('fl_client_id', newClientId);
+      setClientId(newClientId);
+      console.log(`[FL] Generated new client ID: ${newClientId}`);
+    } else {
+      setClientId(storedClientId);
+      console.log(`[FL] Loaded client ID from storage: ${storedClientId}`);
+    }
+  }, []);
 
   // ── Log helper ─────────────────────────────────────────────────────────────
   const addLog = useCallback((line) => {
@@ -62,6 +89,42 @@ export default function FLControlPanel() {
     const cleanup = api.onTrainingLog?.((line) => addLog(line));
     return () => { if (typeof cleanup === 'function') cleanup(); };
   }, [addLog]);
+
+  // ── Subscribe to CUDA progress updates (includes logs) ────────────────────
+  useEffect(() => {
+    if (!api) return;
+    const cleanup = api.onCudaProgress?.((progress) => {
+      setCudaProgress(progress);
+      
+      // Extract message and add to logs (shows raw terminal output)
+      if (progress?.message) {
+        setCudaLogs((prev) => {
+          // Avoid duplicate lines from rapid updates
+          const lastLine = prev[prev.length - 1];
+          if (lastLine === progress.message) {
+            return prev; // Skip if same as last
+          }
+          return [...prev.slice(-150), progress.message];
+        });
+      }
+    });
+    return () => { if (typeof cleanup === 'function') cleanup(); };
+  }, []);
+
+  // ── Check CUDA availability on mount ──────────────────────────────────────
+  useEffect(() => {
+    if (!api) return;
+    const checkCuda = async () => {
+      const status = await api.checkCudaStatus?.();
+      if (status) {
+        setCudaStatus(status);
+        if (!status.cuda_available) {
+          setDevice('cpu'); // Force CPU if CUDA is not available
+        }
+      }
+    };
+    checkCuda();
+  }, []);
 
   // ── Subscribe to menu-triggered events ─────────────────────────────────────
   useEffect(() => {
@@ -114,10 +177,17 @@ export default function FLControlPanel() {
 
   const handleTrain = async () => {
     if (!api || training) return;
+
+    // Check if user selected GPU but it's not available
+    if (device === 'cuda' && !cudaStatus?.cuda_available) {
+      setShowCudaModal(true);
+      return;
+    }
+
     setTraining(true);
     setPanelTab('train');
     setLogs([]);
-    addLog(`[Train] Starting local training  epochs=${epochs}  client=${clientId}`);
+    addLog(`[Train] Starting local training  epochs=${epochs}  client=${clientId}  device=${device}`);
     addLog(`[Train] Dataset: ${datasetPath || '(default)'}`);
 
     try {
@@ -125,6 +195,7 @@ export default function FLControlPanel() {
         dataDir:  datasetPath || undefined,
         clientId,
         epochs:   Number(epochs),
+        device,   // NEW: Pass device selection
       });
       if (result?.killed) {
         addLog('[Train] 🛑 Training stopped by user.');
@@ -137,6 +208,51 @@ export default function FLControlPanel() {
       addLog(`[Train] ❌ Error: ${e.message}`);
     } finally {
       setTraining(false);
+    }
+  };
+
+  // ── Install CUDA PyTorch ───────────────────────────────────────────────────
+  const handleInstallCuda = async () => {
+    if (!api || installingCuda) return;
+    
+    setInstallingCuda(true);
+    setCudaLogs(['[Install] Starting PyTorch CUDA 12.1 installation...']);
+    setCudaProgress({ status: 'started', downloaded: 0, total: 0, percentage: 0, message: '' });
+    
+    try {
+      const result = await api.installCudaPyTorch?.();
+      if (result?.success) {
+        setCudaLogs((prev) => [...prev, '[Install] ✅ Installation successful!']);
+        setCudaLogs((prev) => [...prev, '[Install] Checking CUDA status...']);
+        
+        // Re-check CUDA status
+        const status = await api.checkCudaStatus?.();
+        if (status) {
+          setCudaStatus(status);
+          setCudaLogs((prev) => [...prev, `[Install] ✅ CUDA is now available: ${status.version}`]);
+        }
+      } else {
+        setCudaLogs((prev) => [...prev, `[Install] ❌ Installation failed: ${result?.error}`]);
+      }
+    } catch (e) {
+      setCudaLogs((prev) => [...prev, `[Install] ❌ Error: ${e.message}`]);
+    } finally {
+      setInstallingCuda(false);
+    }
+  };
+
+  const handleCancelCudaInstall = async () => {
+    if (!api) return;
+    
+    try {
+      const result = await api.cancelCudaInstall?.();
+      if (result?.cancelled) {
+        setCudaLogs((prev) => [...prev, '[Install] ❌ Installation cancelled by user']);
+      }
+    } catch (e) {
+      setCudaLogs((prev) => [...prev, `[Install] Error cancelling: ${e.message}`]);
+    } finally {
+      setInstallingCuda(false);
     }
   };
 
@@ -183,6 +299,15 @@ export default function FLControlPanel() {
     } catch (e) {
       addLog(`[Sync] ❌ ${e.message}`);
     }
+  };
+
+  // ── Helper: Format bytes to human-readable size ───────────────────────────
+  const formatBytes = (bytes) => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
   };
 
   // ── Non-Electron fallback ──────────────────────────────────────────────────
@@ -277,15 +402,16 @@ export default function FLControlPanel() {
           {/* Config row */}
           <div style={{ display: 'flex', gap: 12 }}>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-3)' }}>
-              Client ID
+              Client ID <span style={{ fontSize: 11, fontWeight: 600, color: '#059669' }}>(Auto-generated, unique per device)</span>
               <input
                 type="text"
                 value={clientId}
                 onChange={(e) => setClientId(e.target.value)}
+                placeholder="auto-generated"
                 style={{
-                  width: 80, padding: '7px 10px', borderRadius: 8,
+                  width: 200, padding: '7px 10px', borderRadius: 8,
                   border: '1px solid var(--border)', background: 'var(--surface-2)',
-                  color: 'var(--text-1)', fontSize: 13,
+                  color: 'var(--text-1)', fontSize: 13, fontFamily: 'monospace',
                 }}
               />
             </label>
@@ -303,6 +429,80 @@ export default function FLControlPanel() {
                 }}
               />
             </label>
+          </div>
+
+          {/* Device selection (NEW) */}
+          <div style={{
+            background: 'var(--surface-2)',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            padding: '12px 16px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-1)' }}>
+              ⚙️ Compute Device
+            </div>
+            <div style={{ display: 'flex', gap: 16 }}>
+              {/* CPU Option */}
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input
+                  type="radio"
+                  name="device"
+                  value="cpu"
+                  checked={device === 'cpu'}
+                  onChange={(e) => setDevice(e.target.value)}
+                  style={{ cursor: 'pointer' }}
+                />
+                <span style={{ fontSize: 13, color: 'var(--text-1)' }}>CPU (slower but always works)</span>
+              </label>
+
+              {/* GPU Option */}
+              <label style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                cursor: cudaStatus?.cuda_available ? 'pointer' : 'not-allowed',
+                opacity: cudaStatus?.cuda_available ? 1 : 0.5,
+              }}>
+                <input
+                  type="radio"
+                  name="device"
+                  value="cuda"
+                  checked={device === 'cuda'}
+                  onChange={(e) => setDevice(e.target.value)}
+                  disabled={!cudaStatus?.cuda_available}
+                  style={{ cursor: cudaStatus?.cuda_available ? 'pointer' : 'not-allowed' }}
+                />
+                <span style={{ fontSize: 13, color: 'var(--text-1)' }}>GPU (10-50x faster)</span>
+              </label>
+            </div>
+
+            {/* CUDA Status message */}
+            {cudaStatus && (
+              <div style={{ fontSize: 12, color: cudaStatus.cuda_available ? '#22c55e' : '#ef4444', marginTop: 4 }}>
+                {cudaStatus.cuda_available ? (
+                  <>✅ {cudaStatus.device} — Ready for fast training</>
+                ) : (
+                  <>❌ GPU PyTorch not installed — <button
+                    onClick={() => setShowCudaModal(true)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: '#3b82f6',
+                      cursor: 'pointer',
+                      textDecoration: 'underline',
+                      padding: 0,
+                      fontSize: 12,
+                      fontWeight: 600,
+                    }}
+                  >
+                    Install CUDA
+                  </button></>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Action buttons */}
@@ -406,6 +606,298 @@ export default function FLControlPanel() {
               <div><strong>Training allowed:</strong> {String(flStatus.training_allowed)}</div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── CUDA Install Modal ── */}
+      {showCudaModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000,
+          backdropFilter: 'blur(4px)',
+        }}>
+          <div style={{
+            background: '#ffffff',
+            borderRadius: 16,
+            border: '1px solid #e5e7eb',
+            padding: '28px',
+            maxWidth: 500,
+            width: '90%',
+            maxHeight: '80vh',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 16,
+            boxShadow: '0 25px 70px rgba(0, 0, 0, 0.15)',
+          }}>
+            {/* ── Header ── */}
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              paddingBottom: 12,
+              borderBottom: '1px solid #f0f0f0',
+            }}>
+              <div style={{
+                fontSize: 18,
+                fontWeight: 800,
+                color: '#0f172a',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+              }}>
+                ⚙️ GPU Training Setup
+              </div>
+              <button
+                onClick={() => {
+                  if (!installingCuda) setShowCudaModal(false);
+                }}
+                disabled={installingCuda}
+                style={{
+                  background: '#f0f0f0',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: 8,
+                  fontSize: 20,
+                  cursor: installingCuda ? 'not-allowed' : 'pointer',
+                  color: '#666',
+                  opacity: installingCuda ? 0.5 : 1,
+                  padding: '4px 8px',
+                  width: 36,
+                  height: 36,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  transition: 'all 0.2s',
+                }}
+                onMouseEnter={(e) => {
+                  if (!installingCuda) {
+                    e.target.style.background = '#e5e7eb';
+                    e.target.style.color = '#000';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.background = '#f0f0f0';
+                  e.target.style.color = '#666';
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* ── Message ── */}
+            <div style={{
+              fontSize: 14,
+              color: '#4b5563',
+              lineHeight: 1.7,
+              backgroundColor: '#f9fafb',
+              padding: '16px',
+              borderRadius: 8,
+              border: '1px solid #e5e7eb',
+            }}>
+              GPU training requires PyTorch with CUDA 12.1 support. This is a one-time download
+              of approximately <strong style={{ color: '#0f172a' }}>2.4 GB</strong>. Your data never leaves your device.
+            </div>
+
+            {/* ── Progress bar (during installation) ── */}
+            {installingCuda && cudaProgress && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {/* Progress bar */}
+                <div style={{
+                  width: '100%',
+                  height: 28,
+                  background: '#f3f4f6',
+                  borderRadius: 8,
+                  border: '1px solid #e5e7eb',
+                  overflow: 'hidden',
+                  position: 'relative',
+                }}>
+                  <div style={{
+                    height: '100%',
+                    width: `${cudaProgress.percentage || 0}%`,
+                    background: 'linear-gradient(90deg, #3b82f6, #10b981)',
+                    transition: 'width 0.3s ease',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    boxShadow: '0 0 20px rgba(59, 130, 246, 0.4)',
+                  }}>
+                    {cudaProgress.percentage > 10 && (
+                      <span style={{ fontSize: 13, fontWeight: 700, color: '#fff' }}>
+                        {Math.round(cudaProgress.percentage)}%
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Size info */}
+                <div style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  fontSize: 13,
+                  color: '#6b7280',
+                  paddingX: 4,
+                }}>
+                  <span>
+                    <strong style={{ color: '#1f2937' }}>
+                      {cudaProgress.downloaded ? formatBytes(cudaProgress.downloaded) : '0 B'}
+                    </strong>
+                    {' / '}
+                    {cudaProgress.total ? formatBytes(cudaProgress.total) : '~2.4 GB'}
+                  </span>
+                  <span style={{ color: '#3b82f6', fontWeight: 600 }}>
+                    {Math.round(cudaProgress.percentage || 0)}%
+                  </span>
+                </div>
+
+                {/* Status message */}
+                {cudaProgress.message && (
+                  <div style={{
+                    fontSize: 12,
+                    color: '#6b7280',
+                    fontStyle: 'italic',
+                    maxHeight: 40,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                  }}>
+                    {cudaProgress.message}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── Log display ── */}
+            {cudaLogs.length > 0 && (
+              <div style={{
+                background: '#f9fafb',
+                borderRadius: 10,
+                border: '1px solid #e5e7eb',
+                padding: '14px 16px',
+                maxHeight: 220,
+                overflowY: 'auto',
+                fontFamily: '"Fira Code", "Cascadia Code", monospace',
+              }}>
+                {cudaLogs.map((line, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      fontSize: 11.5,
+                      color: line.includes('✅') ? '#059669'
+                           : line.includes('❌') ? '#dc2626'
+                           : line.includes('[Install]') ? '#2563eb'
+                           : '#4b5563',
+                      lineHeight: 1.7,
+                      marginBottom: i === cudaLogs.length - 1 ? 0 : 3,
+                      fontWeight: line.includes('✅') || line.includes('❌') ? 600 : 400,
+                    }}
+                  >
+                    {line}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* ── Buttons ── */}
+            <div style={{
+              display: 'flex',
+              gap: 12,
+              justifyContent: 'flex-end',
+              paddingTop: 12,
+              borderTop: '1px solid #f0f0f0',
+            }}>
+              {installingCuda ? (
+                <>
+                  <button
+                    onClick={handleCancelCudaInstall}
+                    style={{
+                      padding: '10px 20px',
+                      borderRadius: 8,
+                      border: '1px solid #fecaca',
+                      background: '#fee2e2',
+                      color: '#dc2626',
+                      cursor: 'pointer',
+                      fontSize: 13,
+                      fontWeight: 700,
+                      transition: 'all 0.2s',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.target.style.background = '#fca5a5';
+                      e.target.style.color = '#fff';
+                      e.target.style.boxShadow = '0 0 15px rgba(220, 38, 38, 0.3)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.target.style.background = '#fee2e2';
+                      e.target.style.color = '#dc2626';
+                      e.target.style.boxShadow = 'none';
+                    }}
+                  >
+                    ✕ Cancel Download
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => {
+                      setShowCudaModal(false);
+                      setDevice('cpu');
+                    }}
+                    style={{
+                      padding: '10px 20px',
+                      borderRadius: 8,
+                      border: '1px solid #e5e7eb',
+                      background: '#f9fafb',
+                      color: '#374151',
+                      cursor: 'pointer',
+                      fontSize: 13,
+                      fontWeight: 700,
+                      transition: 'all 0.2s',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.target.style.background = '#f3f4f6';
+                      e.target.style.borderColor = '#d1d5db';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.target.style.background = '#f9fafb';
+                      e.target.style.borderColor = '#e5e7eb';
+                    }}
+                  >
+                    Use CPU Instead
+                  </button>
+                  <button
+                    onClick={handleInstallCuda}
+                    style={{
+                      padding: '10px 24px',
+                      borderRadius: 8,
+                      border: 'none',
+                      background: 'linear-gradient(135deg, #3b82f6, #2563eb)',
+                      color: '#fff',
+                      cursor: 'pointer',
+                      fontSize: 13,
+                      fontWeight: 700,
+                      transition: 'all 0.2s',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      boxShadow: '0 4px 15px rgba(59, 130, 246, 0.3)',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.target.style.transform = 'translateY(-2px)';
+                      e.target.style.boxShadow = '0 6px 20px rgba(59, 130, 246, 0.5)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.target.style.transform = 'translateY(0)';
+                      e.target.style.boxShadow = '0 4px 15px rgba(59, 130, 246, 0.3)';
+                    }}
+                  >
+                    <>⬇️ Install CUDA (2.4 GB)</>
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

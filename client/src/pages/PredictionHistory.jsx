@@ -33,6 +33,27 @@ function DetailModal({ pred, onClose }) {
             </div>
           </div>
 
+          {/* Grad-CAM Visualization */}
+          {(pred.gradcamData || pred.gradcamUrl) && (
+            <div style={{ borderRadius: 'var(--radius)', overflow: 'hidden', backgroundColor: 'var(--bg)' }}>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-2)', padding: '10px 14px', borderBottom: '1px solid var(--border)' }}>
+                Model Attention Heatmap
+              </div>
+              <div style={{ padding: 14, display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 200 }}>
+                <img
+                  src={pred.gradcamData || pred.gradcamUrl}
+                  alt="Grad-CAM Heatmap"
+                  style={{
+                    maxWidth: '100%',
+                    maxHeight: 200,
+                    borderRadius: 6,
+                    objectFit: 'contain'
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
           {/* Probabilities */}
           {sorted.length > 0 && (
             <div>
