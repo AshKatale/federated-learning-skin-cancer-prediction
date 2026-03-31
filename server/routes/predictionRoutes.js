@@ -9,7 +9,9 @@ const {
   getPredictionHistory,
   getPredictionById,
   batchPrediction,
-  getPredictionStats
+  getPredictionStats,
+  predictWithFLModel,
+  getFLModelInfo
 } = require('../controllers/predictionController');
 const { protectRoute } = require('../middleware/auth');
 
@@ -45,5 +47,15 @@ router.get('/stats', getPredictionStats);
 
 // Get specific prediction
 router.get('/:id', getPredictionById);
+
+// ==========================================
+// FEDERATED LEARNING MODEL ROUTES
+// ==========================================
+
+// Predict with trained FL model
+router.post('/fl/predict', upload.single('image'), predictWithFLModel);
+
+// Get FL model information
+router.get('/fl/info', getFLModelInfo);
 
 module.exports = router;

@@ -1,368 +1,438 @@
 /**
- * Electron Main Process
- * Manages application lifecycle and spawns backend processes
+ * Electron Main Process — Skin Cancer FL Desktop App
+ *
+ * Architecture:
+ *   React (Renderer) ──IPC──► Preload ──► Main Process ──► Python / FL-Client HTTP
+ *
+ * Two Python execution paths:
+ *   A) Direct spawn: trainModel, runPrediction  (child_process.spawn)
+ *   B) HTTP proxy:   fl-sync, fl-status etc.   (axios → Flask FL client on :7000)
  */
 
-const { app, BrowserWindow, Menu, ipcMain } = require('electron');
-const path = require('path');
-const { spawn } = require('child_process');
-const fs = require('fs');
-const axios = require('axios');
+'use strict';
 
-const SERVER_PORT = 3001;
-const FL_PORT = 8080;
-const ML_PORT = 5000;
-const REACT_PORT = 5173;
+const { app, BrowserWindow, ipcMain, Menu, dialog, shell } = require('electron');
+const path   = require('path');
+const fs     = require('fs');
+const http   = require('http');
+const { spawn, exec } = require('child_process');
 
-// Production build path
-const REACT_BUILD_PATH = path.join(__dirname, '../client/build');
-const SERVER_PATH = path.join(__dirname, '../server');
-const FL_PATH = path.join(__dirname, '../federated-learning');
-const ML_PATH = path.join(__dirname, '../ml-model');
+// Optional axios — only used for FL-client HTTP proxying
+let axios;
+try { axios = require('axios'); } catch { axios = null; }
 
-// Detect if running in development
-const isDev = process.env.NODE_ENV === 'development' || 
-              process.argv.includes('--dev') ||
-              !fs.existsSync(REACT_BUILD_PATH);
+// ── Constants ────────────────────────────────────────────────────────────────
 
-let mainWindow;
-let serverProcess;
-let flServerProcess;
-let pythonMLProcess;
+const REACT_PORT     = 3000;
+const FL_CLIENT_PORT = 7000;
+const SERVER_PORT    = 3001;
+
+// Root of the mono-repo (one level above desktop-app/)
+const PROJECT_ROOT = path.resolve(__dirname, '..');
+const CLIENT_DIST  = path.join(PROJECT_ROOT, 'client', 'dist', 'index.html');
+const FL_DIR       = path.join(PROJECT_ROOT, 'federated-learning');
+const FL_CLIENT_DIR= path.join(__dirname, 'fl_client');
+
+// Dev mode: dist not built yet
+const isDev = !fs.existsSync(CLIENT_DIST);
+
+let mainWindow = null;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Wait for a TCP port to become reachable (handles IPv4/IPv6 on Windows). */
+function waitForPort(port, timeoutMs = 30000) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    const tryIPs   = ['127.0.0.1', '::1'];
+
+    const attempt = () => {
+      let ok = false, checked = 0;
+      tryIPs.forEach((ip) => {
+        const req = http.get({ hostname: ip, port, path: '/' }, (res) => {
+          res.resume();
+          if (!ok) { ok = true; resolve(ip); }
+        });
+        req.on('error', () => {
+          checked++;
+          if (checked === tryIPs.length && !ok) {
+            Date.now() < deadline ? setTimeout(attempt, 500) : resolve(null);
+          }
+        });
+        req.setTimeout(400, () => req.destroy());
+      });
+    };
+    attempt();
+  });
+}
+
+/** Send a log line to the renderer (shown in UI log panel). */
+function sendLog(channel, line) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, line);
+  }
+}
+
+/** Resolve python executable (venv → system). Logs which one is chosen. */
+function getPython() {
+  const candidates = [
+    path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe'), // Windows venv
+    path.join(PROJECT_ROOT, 'venv', 'bin', 'python3'),         // Unix/Mac venv
+    path.join(PROJECT_ROOT, 'venv', 'bin', 'python'),          // Unix venv alt
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      console.log(`[Electron] Using venv Python: ${p}`);
+      return p;
+    }
+  }
+  // Fallback to system python — warn loudly
+  console.warn('[Electron] WARNING: venv not found. Falling back to system Python.');
+  console.warn(`[Electron] Expected venv at: ${path.join(PROJECT_ROOT, 'venv')}`);
+  return 'python';
+}
 
 /**
- * Create main window
+ * Build the environment for spawned Python processes.
+ * Adds venv site-packages and all needed source dirs to PYTHONPATH
+ * so `import torch`, `from skin_cancer_model import ...` etc. all work.
  */
-function createWindow() {
+function getPythonEnv() {
+  const venvRoot    = path.join(PROJECT_ROOT, 'venv');
+  const sitePackWin = path.join(venvRoot, 'Lib', 'site-packages');
+  const sitePackUnix= path.join(venvRoot, 'lib', 'python3.11', 'site-packages'); // adjust if needed
+
+  // Dirs that contain importable Python source for this project
+  const srcDirs = [
+    FL_DIR,           // skin_cancer_model.py, fl_data_loader.py etc.
+    FL_CLIENT_DIR,    // model.py, trainer.py etc.
+  ];
+
+  // Build PYTHONPATH: existing system path + venv site-packages + project src dirs
+  const existingPP = process.env.PYTHONPATH || '';
+  const newPP = [
+    existingPP,
+    sitePackWin,
+    sitePackUnix,
+    ...srcDirs,
+  ].filter(Boolean).join(path.delimiter);
+
+  // Also add venv Scripts/bin to PATH so pip-installed CLIs work
+  const venvBin = process.platform === 'win32'
+    ? path.join(venvRoot, 'Scripts')
+    : path.join(venvRoot, 'bin');
+
+  return {
+    ...process.env,
+    PYTHONUNBUFFERED: '1',     // real-time stdout streaming
+    PYTHONPATH: newPP,
+    PATH: `${venvBin}${path.delimiter}${process.env.PATH || ''}`,
+    VIRTUAL_ENV: venvRoot,
+  };
+}
+
+// ── Window ───────────────────────────────────────────────────────────────────
+
+function createWindow(ip) {
   mainWindow = new BrowserWindow({
-    width: 1400,
+    width: 1440,
     height: 900,
+    minWidth: 960,
+    minHeight: 640,
+    show: false,
+    backgroundColor: '#0f1117',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
-      nodeIntegration: false,
-      contextIsolation: true
+      nodeIntegration: false,   // security: keep Node out of renderer
+      contextIsolation: true,   // security: isolate contexts
+      sandbox: false,           // needed for preload require()
     },
-    icon: path.join(__dirname, './assets/icon.png') // Optional
   });
 
-  // In development: load from dev server
-  // In production: load from build folder
+  const host     = ip || 'localhost';
   const startUrl = isDev
-    ? 'http://localhost:3000'
-    : `file://${path.join(REACT_BUILD_PATH, 'index.html')}`;
+    ? `http://${host}:${REACT_PORT}`
+    : `file://${CLIENT_DIST}`;
 
-  console.log(`[Electron] Loading URL: ${startUrl}`);
+  console.log(`[Electron] Mode: ${isDev ? 'DEV' : 'PROD'} — Loading: ${startUrl}`);
+  mainWindow.loadURL(startUrl);
 
-  mainWindow.loadURL(startUrl).catch(err => {
-    console.error('[Electron] Failed to load URL:', err.message);
-    console.log('[Electron] Make sure React dev server is running on port 3000');
-    console.log('[Electron] Or build React app: cd client && npm run build');
+  mainWindow.webContents.on('did-finish-load', () => {
+    mainWindow.show();
+    if (isDev) mainWindow.webContents.openDevTools({ mode: 'detach' });
   });
 
-  // Open DevTools in development
+  // Retry once on load failure (Vite still warming up)
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc) => {
+    if (code === -3) return; // navigation aborted — ignore
+    console.warn(`[Electron] Load failed (${code}: ${desc}) — retrying in 1.5s`);
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(startUrl);
+    }, 1500);
+  });
+
+  // Open external links in OS browser, not in Electron
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  mainWindow.on('closed', () => { mainWindow = null; });
+}
+
+// ── App lifecycle ────────────────────────────────────────────────────────────
+
+app.on('ready', async () => {
   if (isDev) {
-    mainWindow.webContents.openDevTools();
+    console.log(`[Electron] Waiting for React dev server on :${REACT_PORT}…`);
+    const ip = await waitForPort(REACT_PORT);
+    createWindow(ip);
+  } else {
+    createWindow(null);
   }
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-    cleanupProcesses();
-  });
-}
-
-/**
- * Start Node.js Express server
- */
-function startServer() {
-  return new Promise((resolve, reject) => {
-    console.log('[Electron] Starting Node.js server...');
-
-    // Use npm.cmd on Windows, npm on Unix
-    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-
-    serverProcess = spawn(npmCmd, ['start'], {
-      cwd: SERVER_PATH,
-      env: {
-        ...process.env,
-        NODE_ENV: 'production',
-        PORT: SERVER_PORT
-      },
-      shell: process.platform === 'win32'
-    });
-
-    serverProcess.stdout.on('data', (data) => {
-      console.log(`[Server] ${data}`);
-      if (data.toString().includes('listening') || data.toString().includes('started')) {
-        resolve();
-      }
-    });
-
-    serverProcess.stderr.on('data', (data) => {
-      console.error(`[Server Error] ${data}`);
-    });
-
-    serverProcess.on('error', (error) => {
-      console.error('[Server] Failed to start:', error.message);
-      reject(error);
-    });
-
-    // Timeout after 10 seconds
-    setTimeout(resolve, 10000);
-  });
-}
-
-/**
- * Start Python ML model server
- */
-function startMLServer() {
-  return new Promise((resolve, reject) => {
-    console.log('[Electron] Starting Python ML server...');
-
-    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-
-    pythonMLProcess = spawn(pythonCmd, ['app.py'], {
-      cwd: ML_PATH,
-      env: {
-        ...process.env,
-        FLASK_PORT: ML_PORT,
-        FLASK_ENV: 'production'
-      },
-      shell: process.platform === 'win32'
-    });
-
-    pythonMLProcess.stdout.on('data', (data) => {
-      console.log(`[ML Server] ${data}`);
-      if (data.toString().includes('running') || data.toString().includes('WARNING')) {
-        resolve();
-      }
-    });
-
-    pythonMLProcess.stderr.on('data', (data) => {
-      console.error(`[ML Server Error] ${data}`);
-    });
-
-    pythonMLProcess.on('error', (error) => {
-      console.error('[ML Server] Failed to start:', error.message);
-      reject(error);
-    });
-
-    setTimeout(resolve, 5000);
-  });
-}
-
-/**
- * Start Flower FL Server (runs once, clients connect to it)
- */
-function startFLServer() {
-  return new Promise((resolve, reject) => {
-    console.log('[Electron] Starting Flower FL server...');
-
-    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-
-    flServerProcess = spawn(pythonCmd, ['fl_server.py'], {
-      cwd: FL_PATH,
-      env: {
-        ...process.env,
-        FL_PORT: FL_PORT,
-        FL_SERVER_ADDRESS: `0.0.0.0:${FL_PORT}`
-      },
-      shell: process.platform === 'win32'
-    });
-
-    flServerProcess.stdout.on('data', (data) => {
-      console.log(`[FL Server] ${data}`);
-    });
-
-    flServerProcess.stderr.on('data', (data) => {
-      console.error(`[FL Server Error] ${data}`);
-    });
-
-    flServerProcess.on('error', (error) => {
-      console.error('[FL Server] Failed to start:', error.message);
-      // FL Server is optional for basic operation
-      resolve();
-    });
-
-    // Give it time to start
-    setTimeout(resolve, 3000);
-  });
-}
-
-/**
- * Initialize app
- */
-async function initializeApp() {
-  try {
-    console.log('[Electron] Initializing application...');
-    console.log('[Electron] Starting backend services...');
-
-    // Start servers in parallel, continue even if some fail
-    await Promise.all([
-      startServer().catch(e => {
-        console.warn('Server startup error (non-critical):', e.message);
-      }),
-      startMLServer().catch(e => {
-        console.warn('ML server startup error (non-critical):', e.message);
-      }),
-      startFLServer().catch(e => {
-        console.warn('FL server startup error (non-critical):', e.message);
-      })
-    ]);
-
-    console.log('[Electron] Services initialization complete');
-    createWindow();
-  } catch (error) {
-    console.warn('[Electron] Service initialization error (non-critical):', error.message);
-    // Still create window - services are optional
-    createWindow();
-  }
-}
-
-/**
- * App event handlers
- */
-app.on('ready', initializeApp);
+  buildMenu();
+});
 
 app.on('window-all-closed', () => {
-  // On macOS, apps stay active until user quits explicitly
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('activate', () => {
-  // On macOS, re-create window when dock icon is clicked
-  if (mainWindow === null) {
-    createWindow();
-  }
+  if (!mainWindow) createWindow(null);
 });
 
-/**
- * Cleanup processes on exit
- */
-process.on('exit', cleanupProcesses);
-process.on('SIGINT', () => {
-  cleanupProcesses();
-  process.exit(0);
-});
+// ══════════════════════════════════════════════════════════════════════════════
+// IPC HANDLERS
+// ══════════════════════════════════════════════════════════════════════════════
 
-function cleanupProcesses() {
-  console.log('[Electron] Cleaning up processes...');
+// ── 1. App / service status ──────────────────────────────────────────────────
 
-  if (serverProcess) {
-    serverProcess.kill();
-  }
-  if (flServerProcess) {
-    flServerProcess.kill();
-  }
-  if (pythonMLProcess) {
-    pythonMLProcess.kill();
-  }
-}
-
-/**
- * IPC Handlers for frontend communication
- */
-
-// Get application status
 ipcMain.handle('app-status', async () => {
+  const check = async (url) => {
+    if (!axios) return 'unknown';
+    try { await axios.get(url, { timeout: 3000 }); return 'running'; }
+    catch { return 'offline'; }
+  };
+  return {
+    server:    await check(`http://localhost:${SERVER_PORT}/api/health`),
+    fl_client: await check(`http://localhost:${FL_CLIENT_PORT}/health`),
+    python:    getPython(),
+    mode:      isDev ? 'development' : 'production',
+  };
+});
+
+// ── 2. Train model — spawns Python fl_client directly ───────────────────────
+
+ipcMain.handle('train-model', async (_event, opts = {}) => {
+  return new Promise((resolve) => {
+    const python   = getPython();
+    // Use training_runner.py — a simple CLI wrapper around the FL training logic
+    const script   = path.join(FL_CLIENT_DIR, 'training_runner.py');
+    const dataDir  = opts.dataDir  || process.env.LOCAL_DATA_DIR || 'D:\\Skin Cancer Dataset';
+    const clientId = opts.clientId || '1';
+    const epochs   = String(opts.epochs || 1);
+    const server   = opts.server   || '127.0.0.1:8080';
+
+    const pyEnv = getPythonEnv();
+    console.log(`[IPC:train-model] python=${python}`);
+    console.log(`[IPC:train-model] PYTHONPATH=${pyEnv.PYTHONPATH}`);
+
+    const logs = [];
+    const proc = spawn(python, [
+      script,
+      '--client-id', clientId,
+      '--data-dir',  dataDir,
+      '--epochs',    epochs,
+      '--server',    server,
+    ], {
+      cwd: FL_CLIENT_DIR,
+      env: pyEnv,
+    });
+
+    proc.stdout.on('data', (chunk) => {
+      chunk.toString().split('\n').filter(Boolean).forEach((line) => {
+        logs.push(line);
+        sendLog('training-log', line);
+      });
+    });
+
+    proc.stderr.on('data', (chunk) => {
+      chunk.toString().split('\n').filter(Boolean).forEach((line) => {
+        logs.push(`[stderr] ${line}`);
+        sendLog('training-log', `[stderr] ${line}`);
+      });
+    });
+
+    proc.on('close', (code) => {
+      resolve({ success: code === 0, exitCode: code, logs });
+    });
+
+    proc.on('error', (err) => {
+      resolve({ success: false, error: err.message, logs });
+    });
+  });
+});
+
+// ── 3. Run prediction — spawns inference_runner.py ───────────────────────────
+
+ipcMain.handle('run-prediction', async (_event, imagePath) => {
+  if (!imagePath) return { error: 'No image path provided' };
+
+  return new Promise((resolve) => {
+    const python = getPython();
+    // inference_runner.py: accepts --image, prints JSON on last stdout line
+    const script = path.join(FL_CLIENT_DIR, 'inference_runner.py');
+
+    const proc = spawn(python, [script, '--image', imagePath], {
+      cwd: FL_CLIENT_DIR,
+      env: getPythonEnv(),
+    });
+
+    let stdout = '', stderr = '';
+    proc.stdout.on('data', (d) => { stdout += d.toString(); });
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    proc.on('close', (code) => {
+      try {
+        // The Python script prints JSON on the last line of stdout
+        const lines  = stdout.trim().split('\n');
+        const result = JSON.parse(lines[lines.length - 1]);
+        resolve({ success: true, prediction: result });
+      } catch {
+        resolve({ success: false, stdout, stderr, exitCode: code });
+      }
+    });
+
+    proc.on('error', (err) => {
+      resolve({ success: false, error: err.message });
+    });
+  });
+});
+
+// ── 4. Select image file ─────────────────────────────────────────────────────
+
+ipcMain.handle('select-file', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Skin Lesion Image',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'bmp', 'tif', 'tiff'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+  if (result.canceled || result.filePaths.length === 0) return { canceled: true };
+  return { canceled: false, filePath: result.filePaths[0] };
+});
+
+// ── 5. Select dataset folder ─────────────────────────────────────────────────
+
+ipcMain.handle('select-dataset-folder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Skin Cancer Dataset Folder',
+    properties: ['openDirectory'],
+    buttonLabel: 'Use This Folder',
+  });
+  if (result.canceled || result.filePaths.length === 0) return { canceled: true };
+
+  const folderPath = result.filePaths[0];
+
+  // Notify running FL client (if any) via HTTP
+  if (axios) {
+    try {
+      const r = await axios.post(
+        `http://localhost:${FL_CLIENT_PORT}/api/set-dataset`,
+        { data_dir: folderPath },
+        { timeout: 5000 }
+      );
+      return { canceled: false, path: folderPath, fl_response: r.data };
+    } catch {
+      return { canceled: false, path: folderPath, fl_response: null };
+    }
+  }
+  return { canceled: false, path: folderPath, fl_response: null };
+});
+
+// ── 6. FL-client HTTP proxy handlers (Flask on :7000) ───────────────────────
+
+const flProxy = (method, endpoint, body = null) => async () => {
+  if (!axios) return { error: 'axios not available' };
   try {
-    const serverHealth = await axios.get(`http://localhost:${SERVER_PORT}/api/health`)
-      .then(() => true)
-      .catch(() => false);
+    const url = `http://localhost:${FL_CLIENT_PORT}${endpoint}`;
+    const r   = method === 'GET'
+      ? await axios.get(url, { timeout: 10000 })
+      : await axios.post(url, body || {}, { timeout: 60000 });
+    return r.data;
+  } catch (e) { return { error: e.message }; }
+};
 
-    const mlHealth = await axios.get(`http://localhost:${ML_PORT}/health`)
-      .then(() => true)
-      .catch(() => false);
+ipcMain.handle('fl-sync',   flProxy('POST', '/api/sync'));
+ipcMain.handle('fl-train',  flProxy('POST', '/api/train'));
+ipcMain.handle('fl-status', flProxy('GET',  '/api/status'));
 
-    return {
-      server: serverHealth ? 'running' : 'offline',
-      ml: mlHealth ? 'running' : 'offline',
-      fl: flServerProcess ? 'running' : 'offline'
-    };
-  } catch (error) {
-    return {
-      server: 'error',
-      ml: 'error',
-      fl: 'error'
-    };
-  }
-});
+// ── 7. Misc ──────────────────────────────────────────────────────────────────
 
-// Start FL training
-ipcMain.handle('start-fl-training', async (event, { type, config }) => {
+ipcMain.handle('open-devtools', () => mainWindow?.webContents.openDevTools());
+
+ipcMain.handle('read-file', async (_event, filePath) => {
   try {
-    const url = type === 'global'
-      ? `http://localhost:${SERVER_PORT}/api/federated-learning/train-global`
-      : `http://localhost:${SERVER_PORT}/api/federated-learning/train-local`;
-
-    const response = await axios.post(url, config);
-    return response.data;
-  } catch (error) {
-    return {
-      success: false,
-      error: error.message
-    };
+    const data = fs.readFileSync(filePath);
+    return { success: true, data: data.toString('base64'), size: data.length };
+  } catch (e) {
+    return { success: false, error: e.message };
   }
 });
 
-// Get training status
-ipcMain.handle('get-training-status', async (event, trainingId) => {
+ipcMain.handle('list-dataset', async (_event, dir) => {
   try {
-    const response = await axios.get(
-      `http://localhost:${SERVER_PORT}/api/federated-learning/${trainingId}/status`
-    );
-    return response.data;
-  } catch (error) {
-    return {
-      success: false,
-      error: error.message
-    };
+    if (!dir || !fs.existsSync(dir)) return { error: 'Directory not found' };
+    const files = fs.readdirSync(dir)
+      .filter(f => /\.(jpg|jpeg|png|bmp|tif|tiff)$/i.test(f))
+      .slice(0, 500); // cap at 500 for performance
+    return { success: true, files, count: files.length };
+  } catch (e) {
+    return { error: e.message };
   }
 });
 
-// Open DevTools
-ipcMain.handle('open-devtools', () => {
-  if (mainWindow) {
-    mainWindow.webContents.openDevTools();
-  }
-});
+// ── Menu ─────────────────────────────────────────────────────────────────────
 
-/**
- * Menu setup
- */
-const createMenu = () => {
-  const template = [
+function buildMenu() {
+  const tpl = [
     {
       label: 'File',
       submenu: [
-        {
-          label: 'Exit',
-          accelerator: 'CmdOrCtrl+Q',
-          click: () => {
-            app.quit();
+        { label: 'Exit', accelerator: 'CmdOrCtrl+Q', click: () => app.quit() },
+      ],
+    },
+    {
+      label: 'FL',
+      submenu: [
+        { label: 'Sync Global Model',  click: () => mainWindow?.webContents.send('trigger-sync') },
+        { label: 'Start Training',     click: () => mainWindow?.webContents.send('trigger-train') },
+        { label: 'Select Dataset…',   click: async () => {
+            const r = await dialog.showOpenDialog(mainWindow, {
+              properties: ['openDirectory'], buttonLabel: 'Use This Folder',
+            });
+            if (!r.canceled) mainWindow?.webContents.send('dataset-changed', r.filePaths[0]);
           }
-        }
-      ]
+        },
+      ],
     },
     {
       label: 'View',
       submenu: [
-        {
-          label: 'Toggle DevTools',
-          accelerator: 'CmdOrCtrl+Shift+I',
-          click: () => {
-            if (mainWindow) {
-              mainWindow.webContents.toggleDevTools();
-            }
-          }
-        }
-      ]
-    }
+        { label: 'Toggle DevTools', accelerator: 'CmdOrCtrl+Shift+I',
+          click: () => mainWindow?.webContents.toggleDevTools() },
+        { label: 'Reload',          accelerator: 'CmdOrCtrl+R',
+          click: () => mainWindow?.webContents.reload() },
+        { label: 'Zoom In',         accelerator: 'CmdOrCtrl+=',
+          click: () => mainWindow?.webContents.setZoomLevel(
+            mainWindow.webContents.getZoomLevel() + 0.5) },
+        { label: 'Zoom Out',        accelerator: 'CmdOrCtrl+-',
+          click: () => mainWindow?.webContents.setZoomLevel(
+            mainWindow.webContents.getZoomLevel() - 0.5) },
+      ],
+    },
   ];
-
-  const menu = Menu.buildFromTemplate(template);
-  Menu.setApplicationMenu(menu);
-};
-
-app.on('ready', createMenu);
+  Menu.setApplicationMenu(Menu.buildFromTemplate(tpl));
+}

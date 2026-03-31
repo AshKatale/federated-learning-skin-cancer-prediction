@@ -298,10 +298,142 @@ const getPredictionStats = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Predict using trained Federated Learning model
+ * @route   POST /api/predictions/fl/predict
+ * @access  Private
+ */
+const predictWithFLModel = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No image provided'
+      });
+    }
+
+    const { modelRound } = req.body;
+    const startTime = Date.now();
+
+    // Save the uploaded file temporarily
+    const tempFilePath = path.join('./uploads', `temp_${Date.now()}_${req.file.originalname}`);
+    fs.writeFileSync(tempFilePath, req.file.buffer);
+
+    try {
+      // Call Python Flask service for FL model inference
+      const formData = new FormData();
+      formData.append('image', new Blob([req.file.buffer]), req.file.originalname);
+      if (modelRound) {
+        formData.append('model_round', modelRound);
+      }
+
+      const flInferenceAPI = process.env.FL_INFERENCE_API || 'http://localhost:5001';
+      const flResponse = await axios.post(`${flInferenceAPI}/api/fl-predict`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 30000
+      });
+
+      const processingTime = Date.now() - startTime;
+
+      if (!flResponse.data.success) {
+        return res.status(500).json({
+          success: false,
+          message: 'FL Model prediction failed',
+          details: flResponse.data.error
+        });
+      }
+
+      const predictionData = flResponse.data.result;
+
+      // Create prediction record
+      const prediction = new Prediction({
+        userId: req.user.id,
+        imageFileName: req.file.originalname,
+        imageUrl: `uploads/${req.file.filename}`,
+        imageSize: req.file.size,
+        prediction: {
+          className: predictionData.predicted_class_name,
+          classId: predictionData.predicted_class,
+          confidence: predictionData.confidence,
+          allProbabilities: predictionData.all_probabilities
+        },
+        modelType: 'federated-learning',
+        modelRound: predictionData.model_round,
+        riskLevel: predictionData.confidence > 0.8 ? 'High' : predictionData.confidence > 0.6 ? 'Medium' : 'Low',
+        processingTime
+      });
+
+      await prediction.save();
+
+      res.status(201).json({
+        success: true,
+        prediction: prediction,
+        modelInfo: {
+          type: 'federated-learning',
+          round: predictionData.model_round,
+          device: predictionData.device
+        },
+        message: 'FL Model prediction completed successfully'
+      });
+    } finally {
+      // Clean up temp file
+      if (fs.existsSync(tempFilePath)) {
+        fs.unlinkSync(tempFilePath);
+      }
+    }
+  } catch (error) {
+    console.error('FL Model prediction error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'FL Model prediction failed',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @desc    Get FL Model information
+ * @route   GET /api/predictions/fl/info
+ * @access  Private
+ */
+const getFLModelInfo = async (req, res) => {
+  try {
+    const flInferenceAPI = process.env.FL_INFERENCE_API || 'http://localhost:5001';
+    
+    const response = await axios.get(`${flInferenceAPI}/api/fl-model-info`, {
+      timeout: 5000
+    });
+
+    res.status(200).json({
+      success: true,
+      modelInfo: response.data
+    });
+  } catch (error) {
+    console.error('Failed to get FL model info:', error);
+    
+    // Return default info if API is unavailable
+    res.status(200).json({
+      success: true,
+      modelInfo: {
+        model_type: 'EfficientNet-B0',
+        num_classes: 7,
+        class_names: ['Actinic Keratosis', 'Basal Cell Carcinoma', 'Benign Keratosis',
+                     'Dermatofibroma', 'Melanoma', 'Nevus', 'Vascular'],
+        trained_round: 'unknown',
+        device: 'unknown',
+        available: false,
+        error: error.message
+      }
+    });
+  }
+};
+
 module.exports = {
   submitPrediction,
   getPredictionHistory,
   getPredictionById,
   batchPrediction,
-  getPredictionStats
-};
+  getPredictionStats,
+  predictWithFLModel,
+  getFLModelInfo
+}

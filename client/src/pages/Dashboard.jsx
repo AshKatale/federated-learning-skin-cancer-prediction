@@ -174,7 +174,7 @@ export default function Dashboard() {
                   </thead>
                   <tbody>
                     {recentPredictions.map((pred) => (
-                      <tr key={pred.id}>
+                      <tr key={pred._id || pred.id}>
                         <td style={{ fontWeight: 600, color: 'var(--text-1)', maxWidth:180, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
                           {pred.className}
                         </td>

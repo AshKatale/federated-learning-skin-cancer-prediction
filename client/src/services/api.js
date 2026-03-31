@@ -1,6 +1,11 @@
 import axios from 'axios';
 
-const API_BASE = 'http://localhost:3001/api';
+// In dev: use relative URL → goes through Vite proxy → no CORS
+// In prod (Electron file:// or built): use absolute URL
+const isElectronProd = window.location.protocol === 'file:';
+const API_BASE = isElectronProd
+  ? 'http://localhost:3001/api'
+  : '/api';
 
 const api = axios.create({
   baseURL: API_BASE,

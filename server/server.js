@@ -32,7 +32,7 @@ const { connectDB } = require('./config/database');
 const app = express();
 const PORT = process.env.PORT || 3001;
 const ML_API = process.env.ML_API || 'http://localhost:5000';
-const FL_API = process.env.FL_API || 'http://localhost:6000';
+const FL_SERVER = process.env.FL_SERVER_URL || 'http://localhost:6000'; // standalone FL server
 
 // Create upload directory if it doesn't exist
 const uploadDir = process.env.UPLOAD_DIR || './uploads';
@@ -46,8 +46,34 @@ connectDB();
 // Middleware
 app.use(morgan('combined'));
 app.use(cors({
-  origin: process.env.CORS_ORIGIN?.split(',') || '*' || 'http://localhost:3001' || 'http://localhost:5173',
-  credentials: true
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, Electron main process)
+    if (!origin) return callback(null, true);
+
+    const allowed = (process.env.CORS_ORIGIN || '')
+      .split(',')
+      .map(o => o.trim())
+      .filter(Boolean);
+
+    // Default dev origins — covers browser + Electron (127.0.0.1) + any port 3000-3010
+    const defaults = [
+      /^http:\/\/localhost:\d+$/,
+      /^http:\/\/127\.0\.0\.1:\d+$/,
+      /^http:\/\/192\.168\.\d+\.\d+:\d+$/,
+    ];
+
+    const isAllowed =
+      allowed.includes(origin) ||
+      defaults.some(re => re.test(origin));
+
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      console.warn(`[CORS] Blocked origin: ${origin}`);
+      callback(new Error(`CORS: origin ${origin} not allowed`));
+    }
+  },
+  credentials: true,
 }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -110,24 +136,14 @@ app.get('/api/health/ml', async (req, res) => {
 });
 
 /**
- * Check FL API Health
+ * Check FL Server Health (standalone cloud service)
  */
 app.get('/api/health/fl', async (req, res) => {
   try {
-    const response = await axios.get(`${FL_API}/api/health`, { timeout: 5000 });
-    res.json({
-      status: 'healthy',
-      service: 'fl-api',
-      details: response.data,
-      timestamp: new Date()
-    });
+    const response = await axios.get(`${FL_SERVER}/health`, { timeout: 5000 });
+    res.json({ status: 'healthy', service: 'fl-server', details: response.data, timestamp: new Date() });
   } catch (error) {
-    res.status(503).json({
-      status: 'unavailable',
-      service: 'fl-api',
-      error: error.message,
-      timestamp: new Date()
-    });
+    res.status(503).json({ status: 'unavailable', service: 'fl-server', error: error.message, timestamp: new Date() });
   }
 });
 
@@ -211,7 +227,7 @@ const server = app.listen(PORT, () => {
 📦 Environment: ${process.env.NODE_ENV || 'development'}
 🗄️  Database: MongoDB
 🤖 ML Service: ${ML_API}
-🔗 FL Service: ${FL_API}
+🔗 FL Service: ${FL_SERVER}
 
 📚 API Documentation:
    - POST   /api/auth/register

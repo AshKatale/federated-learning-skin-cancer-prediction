@@ -1,39 +1,37 @@
 /**
- * Federated Learning Routes
+ * Federated Learning Routes (server-side)
+ *
+ * The Node.js backend does NOT handle model weights.
+ * It only tracks round metadata in the database for the admin dashboard.
+ * All weight operations go directly between desktop clients and the FL server.
  */
 
 const express = require('express');
 const {
-  initiateRound,
   getAllRounds,
   getRoundDetails,
-  updateClientResults,
-  completeRound,
   getAnalytics,
-  trainGlobal,
-  trainLocal,
-  getTrainingStatus
+  getTrainingStatus,
+  recordClientSubmission,
+  initiateRound,
 } = require('../controllers/federatedLearningController');
 const { protectRoute, authorize } = require('../middleware/auth');
 
 const router = express.Router();
 
-// All routes require authentication
 router.use(protectRoute);
 
-// Training modes (main endpoints)
-router.post('/train-global', authorize('admin'), trainGlobal);
-router.post('/train-local', trainLocal);
-
-// Training status and analytics
-router.get('/:trainingId/status', getTrainingStatus);
-router.get('/analytics', authorize('admin', 'doctor'), getAnalytics);
-
-// Legacy endpoints
-router.post('/rounds/initiate', authorize('admin'), initiateRound);
-router.put('/rounds/:id/complete', authorize('admin'), completeRound);
-router.put('/rounds/:id/update-client', authorize('admin'), updateClientResults);
+// Dashboard/analytics (read-only)
 router.get('/rounds', authorize('admin', 'doctor'), getAllRounds);
 router.get('/rounds/:id', authorize('admin', 'doctor'), getRoundDetails);
+router.get('/analytics', authorize('admin', 'doctor'), getAnalytics);
+router.get('/:trainingId/status', getTrainingStatus);
+
+// Admin: manually initiate a new round (creates DB record, does NOT touch weights)
+router.post('/rounds/initiate', authorize('admin'), initiateRound);
+
+// Desktop client calls this to log that it submitted weights to FL server
+// NO weights pass through here – just metadata
+router.post('/client/submitted', protectRoute, recordClientSubmission);
 
 module.exports = router;

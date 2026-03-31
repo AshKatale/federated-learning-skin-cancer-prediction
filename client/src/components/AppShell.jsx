@@ -63,6 +63,18 @@ const LogoutIcon = () => (
   </svg>
 );
 
+// FL / brain icon — shown only in Electron desktop app
+const FLIcon = () => (
+  <svg viewBox="0 0 24 24" stroke="currentColor" fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 2a5 5 0 0 1 5 5c0 1.5-.6 2.8-1.6 3.8" />
+    <path d="M7 7a5 5 0 0 0 3.4 9.4" />
+    <circle cx="12" cy="17" r="3" />
+    <path d="M12 14v-3" />
+    <path d="M9 17H6a2 2 0 0 1 0-4h1" />
+    <path d="M15 17h3a2 2 0 0 0 0-4h-1" />
+  </svg>
+);
+
 const DnaLogoIcon = () => (
   <svg viewBox="0 0 24 24" fill="white" strokeWidth="0">
     <path d="M12 2C8.13 2 5 5.13 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26A7 7 0 0019 9c0-3.87-3.13-7-7-7zm0 2c2.76 0 5 2.24 5 5 0 1.64-.79 3.09-2 4V15h-6v-2c-1.21-.91-2-2.36-2-4 0-2.76 2.24-5 5-5zm-1 16h2v2h-2zM8 22h8v-1H8z"/>
@@ -114,6 +126,17 @@ export default function AppShell({ children }) {
           >
             <ProfileIcon />
           </NavLink>
+
+          {/* FL Dashboard — only visible in Electron desktop app */}
+          {typeof window !== 'undefined' && window.electronAPI && (
+            <NavLink
+              to="/fl"
+              className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+              title="Federated Learning"
+            >
+              <FLIcon />
+            </NavLink>
+          )}
 
           {isAdmin && (
             <NavLink

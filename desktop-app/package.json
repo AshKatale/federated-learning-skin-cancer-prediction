@@ -1,18 +1,18 @@
 {
   "name": "skin-cancer-detection-desktop",
   "version": "1.0.0",
-  "description": "Desktop app for federated learning-based skin cancer detection",
+  "description": "Privacy-preserving federated learning desktop app for skin cancer detection",
   "main": "main.js",
   "homepage": "./",
   "scripts": {
     "start": "electron .",
-    "dev": "concurrently \"npm run server\" \"npm run flask\" \"electron .\"",
-    "server": "cd ../server && npm start",
-    "flask": "cd ../federated-learning && python app.py",
-    "build": "electron-builder",
-    "build-win": "electron-builder --win --publish never",
-    "build-mac": "electron-builder --mac --publish never",
-    "build-linux": "electron-builder --linux --publish never"
+    "dev": "electron .",
+    "build-react": "cd ../client && npm run build",
+    "build": "npm run build-react && electron-builder",
+    "build-win": "npm run build-react && electron-builder --win --publish never",
+    "build-mac": "npm run build-react && electron-builder --mac --publish never",
+    "build-linux": "npm run build-react && electron-builder --linux --publish never",
+    "dev-full": "concurrently --kill-others \"cd ../client && npm run dev\" \"electron .\""
   },
   "dependencies": {
     "axios": "^1.6.0"
@@ -25,16 +25,33 @@
   "build": {
     "appId": "com.skin-cancer-detection.app",
     "productName": "Skin Cancer Detection",
+    "directories": {
+      "output": "release"
+    },
     "files": [
       "main.js",
       "preload.js",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "../client/dist",
+        "to": "../client/dist",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../desktop-app/fl_client",
+        "to": "../desktop-app/fl_client",
+        "filter": ["**/*.py", "requirements.txt"]
+      },
+      {
+        "from": "../federated-learning",
+        "to": "../federated-learning",
+        "filter": ["*.py", "requirements.txt"]
+      }
+    ],
     "win": {
-      "target": [
-        "nsis",
-        "portable"
-      ],
+      "target": ["nsis", "portable"],
       "certificateFile": null,
       "certificatePassword": null
     },
