@@ -30,7 +30,7 @@ const SERVER_PORT    = 3001;
 // Root of the mono-repo (one level above desktop-app/)
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const CLIENT_DIST  = path.join(PROJECT_ROOT, 'client', 'dist', 'index.html');
-const FL_DIR       = path.join(PROJECT_ROOT, 'federated-learning');
+const FL_DIR       = path.join(PROJECT_ROOT, 'ml-model');
 const FL_CLIENT_DIR= path.join(__dirname, 'fl_client');
 
 // Dev mode: dist not built yet
@@ -746,7 +746,160 @@ ipcMain.handle('fl-sync',   flProxy('POST', '/api/sync'));
 ipcMain.handle('fl-train',  flProxy('POST', '/api/train'));
 ipcMain.handle('fl-status', flProxy('GET',  '/api/status'));
 
-// ── 7. Misc ──────────────────────────────────────────────────────────────────
+// ── 7. Model Evaluation ──────────────────────────────────────────────────────
+
+/**
+ * Evaluate the global FL model on a test dataset.
+ * Streams progress logs via 'evaluation-log' channel.
+ * Returns: { success, overall_accuracy, per_class_metrics, confusion_matrix, ... }
+ */
+ipcMain.handle('evaluate-model', async (_event, opts = {}) => {
+  return new Promise((resolve) => {
+    const python = getPython();
+    const script = path.join(FL_CLIENT_DIR, 'evaluate_model.py');
+    const modelPath = opts.modelPath || path.join(FL_CLIENT_DIR, 'local_weights', 'global_model_round_1.pt');
+    const testDir = opts.testDir || 'D:\\Skin Cancer Dataset\\test';
+
+    if (!fs.existsSync(script)) {
+      return resolve({ success: false, error: 'evaluate_model.py not found' });
+    }
+
+    sendLog('evaluation-log', `[Evaluate] Starting model evaluation...`);
+    sendLog('evaluation-log', `[Evaluate] Model: ${modelPath}`);
+    sendLog('evaluation-log', `[Evaluate] Test folder: ${testDir}`);
+
+    const evalProc = spawn(python, [
+      script,
+      '--data-dir', testDir,
+      '--model-path', modelPath,
+      '--server', 'http://127.0.0.1:6000',
+    ], {
+      cwd: FL_CLIENT_DIR,
+      env: getPythonEnv(),
+    });
+
+    let stdout = '', stderr = '';
+
+    evalProc.stdout.on('data', (d) => {
+      const text = d.toString();
+      stdout += text;
+      // Extract and log progress lines
+      text.split('\n').forEach(line => {
+        if (line.includes('Progress:') || line.includes('Found') || line.includes('Loading')) {
+          sendLog('evaluation-log', `[Eval] ${line.trim()}`);
+        }
+      });
+    });
+
+    evalProc.stderr.on('data', (d) => {
+      const text = d.toString();
+      stderr += text;
+      text.split('\n').filter(Boolean).forEach(line => {
+        sendLog('evaluation-log', `[Eval Error] ${line}`);
+      });
+    });
+
+    evalProc.on('close', (code) => {
+      if (code === 0) {
+        try {
+          const lines = stdout.trim().split('\n');
+          const result = JSON.parse(lines[lines.length - 1]);
+          sendLog('evaluation-log', `[Evaluate] ✅ Evaluation complete!`);
+          sendLog('evaluation-log', `[Evaluate] Overall Accuracy: ${(result.overall_accuracy * 100).toFixed(2)}%`);
+          resolve({ success: true, ...result });
+        } catch (e) {
+          sendLog('evaluation-log', `[Evaluate] ❌ Failed to parse results: ${e.message}`);
+          resolve({ success: false, error: 'Failed to parse evaluation results', stdout, stderr });
+        }
+      } else {
+        sendLog('evaluation-log', `[Evaluate] ❌ Evaluation failed (exit code: ${code})`);
+        resolve({ success: false, error: `Exit code ${code}`, stderr });
+      }
+    });
+
+    evalProc.on('error', (err) => {
+      sendLog('evaluation-log', `[Evaluate] ❌ Error: ${err.message}`);
+      resolve({ success: false, error: err.message });
+    });
+  });
+});
+
+// ── 8. AI Analysis via Gemini ────────────────────────────────────────────────
+
+/**
+ * Get Gemini AI analysis for a skin cancer prediction.
+ * Returns: { diagnosis, explanation, recommendations, risk_level, ... }
+ */
+ipcMain.handle('analyze-prediction', async (_event, opts = {}) => {
+  return new Promise((resolve) => {
+    const python = getPython();
+    const script = path.join(FL_CLIENT_DIR, 'gemini_analyzer.py');
+
+    if (!fs.existsSync(script)) {
+      return resolve({ 
+        success: false, 
+        error: 'gemini_analyzer.py not found',
+        fallback: true 
+      });
+    }
+
+    const { predictedClass, confidence, allProbabilities } = opts;
+
+    const analyzeProc = spawn(python, [
+      script,
+      '--class', predictedClass || 'bkl',
+      '--confidence', String(confidence || 0.5),
+      '--probs', JSON.stringify(allProbabilities || {}),
+    ], {
+      cwd: FL_CLIENT_DIR,
+      env: getPythonEnv(),
+    });
+
+    let stdout = '', stderr = '';
+
+    analyzeProc.stdout.on('data', (d) => {
+      stdout += d.toString();
+    });
+
+    analyzeProc.stderr.on('data', (d) => {
+      stderr += d.toString();
+      console.log(`[Gemini Analyzer stderr] ${d.toString()}`);
+    });
+
+    analyzeProc.on('close', (code) => {
+      if (code === 0) {
+        try {
+          const result = JSON.parse(stdout.trim());
+          resolve(result);
+        } catch (e) {
+          console.log(`[Gemini] Failed to parse result: ${e.message}`);
+          resolve({ 
+            success: false, 
+            error: 'Failed to parse AI analysis',
+            fallback: true 
+          });
+        }
+      } else {
+        console.log(`[Gemini] Process exited with code ${code}`);
+        resolve({ 
+          success: false, 
+          error: `Process exit code ${code}`,
+          fallback: true 
+        });
+      }
+    });
+
+    analyzeProc.on('error', (err) => {
+      resolve({ 
+        success: false, 
+        error: err.message,
+        fallback: true 
+      });
+    });
+  });
+});
+
+// ── 9. Misc ──────────────────────────────────────────────────────────────────
 
 ipcMain.handle('open-devtools', () => mainWindow?.webContents.openDevTools());
 

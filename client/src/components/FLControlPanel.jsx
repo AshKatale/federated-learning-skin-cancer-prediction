@@ -42,12 +42,15 @@ export default function FLControlPanel() {
   const [predicting,    setPredicting]    = useState(false);
   const [epochs,        setEpochs]        = useState(1);
   const [clientId,      setClientId]      = useState('1');
-  const [panelTab,      setPanelTab]      = useState('train'); // 'train' | 'predict' | 'status'
+  const [panelTab,      setPanelTab]      = useState('train'); // 'train' | 'predict' | 'status' | 'evaluate'
   const [device,        setDevice]        = useState('cpu');   // NEW: 'cpu' or 'cuda'
   const [cudaStatus,    setCudaStatus]    = useState(null);    // NEW: CUDA availability info
   const [showCudaModal, setShowCudaModal] = useState(false);   // NEW: CUDA install prompt
   const [installingCuda, setInstallingCuda] = useState(false); // NEW: CUDA installation in progress
   const [cudaLogs,      setCudaLogs]      = useState([]);      // NEW: CUDA install logs
+  const [testDir,       setTestDir]        = useState('');     // NEW: Test dataset path
+  const [evaluating,    setEvaluating]    = useState(false);   // NEW: Evaluation in progress
+  const [evalResults,   setEvalResults]   = useState(null);    // NEW: Evaluation results
   const [cudaProgress,  setCudaProgress]  = useState(null);    // NEW: CUDA download progress { downloaded, total, percentage }
 
   const logsEndRef = useRef(null);
@@ -110,6 +113,13 @@ export default function FLControlPanel() {
     });
     return () => { if (typeof cleanup === 'function') cleanup(); };
   }, []);
+
+  // ── Subscribe to streaming evaluation logs from main process ────────────────
+  useEffect(() => {
+    if (!api) return;
+    const cleanup = api.onEvaluationLog?.((line) => addLog(line));
+    return () => { if (typeof cleanup === 'function') cleanup(); };
+  }, [addLog]);
 
   // ── Check CUDA availability on mount ──────────────────────────────────────
   useEffect(() => {
@@ -301,6 +311,33 @@ export default function FLControlPanel() {
     }
   };
 
+  const handleEvaluate = async () => {
+    if (!api || evaluating || !testDir) return;
+    setEvaluating(true);
+    setEvalResults(null);
+    addLog(`[Evaluate] Starting model evaluation…`);
+    addLog(`[Evaluate] Test folder: ${testDir}`);
+
+    try {
+      const res = await api.evaluateModel({
+        testDir,
+        modelPath: undefined, // Use default global model
+      });
+      if (res.success) {
+        setEvalResults(res);
+        addLog(`[Evaluate] ✅ Overall accuracy: ${(res.overall_accuracy * 100).toFixed(2)}%`);
+      } else {
+        setEvalResults(res);
+        addLog(`[Evaluate] ❌ ${res.error}`);
+      }
+    } catch (e) {
+      setEvalResults({ success: false, error: e.message });
+      addLog(`[Evaluate] ❌ ${e.message}`);
+    } finally {
+      setEvaluating(false);
+    }
+  };
+
   // ── Helper: Format bytes to human-readable size ───────────────────────────
   const formatBytes = (bytes) => {
     if (bytes === 0) return '0 B';
@@ -355,7 +392,7 @@ export default function FLControlPanel() {
 
       {/* ── Tab bar ── */}
       <div style={{ display: 'flex', gap: 4 }}>
-        {[['train', 'Train Model'], ['predict', 'Run Prediction'], ['status', 'Logs']].map(([tab, label]) => (
+        {[['train', 'Train Model'], ['predict', 'Run Prediction'], ['evaluate', 'Evaluate Model'], ['status', 'Logs']].map(([tab, label]) => (
           <button
             key={tab}
             onClick={() => setPanelTab(tab)}
@@ -584,6 +621,163 @@ export default function FLControlPanel() {
 
           {/* Prediction result */}
           {prediction && <PredictionCard pred={prediction} />}
+        </div>
+      )}
+
+      {/* ── Evaluation tab ── */}
+      {panelTab === 'evaluate' && (
+        <div className="card" style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--text-1)' }}>
+            📊 Evaluate Global Model
+          </div>
+          <p style={{ margin: 0, fontSize: 13, color: 'var(--text-3)', lineHeight: 1.6 }}>
+            Test the global federated learning model on a test dataset. Computes overall accuracy
+            and per-class metrics.
+          </p>
+
+          {/* Test folder picker */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              readOnly
+              value={testDir}
+              placeholder="Test dataset folder"
+              style={{
+                flex: 1, padding: '9px 12px', borderRadius: 8, border: '1px solid var(--border)',
+                background: 'var(--surface-2)', color: 'var(--text-1)', fontSize: 13,
+              }}
+            />
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={async () => {
+                const res = await api.selectDatasetFolder();
+                if (!res.canceled) setTestDir(res.path);
+              }}
+            >
+              Browse…
+            </button>
+          </div>
+
+          {/* Evaluate button */}
+          <button
+            className="btn btn-primary"
+            disabled={evaluating || !testDir}
+            onClick={handleEvaluate}
+            style={{
+              opacity: evaluating || !testDir ? 0.6 : 1,
+              cursor: evaluating || !testDir ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {evaluating ? '⏳ Evaluating...' : '▶ Start Evaluation'}
+          </button>
+
+          {/* Evaluation Results */}
+          {evalResults && evalResults.success && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {/* Overall Accuracy */}
+              <div style={{
+                backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                borderLeft: '4px solid #22c55e',
+                borderRadius: 8,
+                padding: '16px',
+              }}>
+                <div style={{ fontSize: 13, color: 'var(--text-2)', marginBottom: 4 }}>
+                  Overall Accuracy
+                </div>
+                <div style={{
+                  fontSize: 28,
+                  fontWeight: 800,
+                  color: '#22c55e',
+                }}>
+                  {(evalResults.overall_accuracy * 100).toFixed(2)}%
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>
+                  {evalResults.total_samples} test samples
+                </div>
+              </div>
+
+              {/* Per-Class Metrics */}
+              {evalResults.per_class_metrics && (
+                <div>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-2)', marginBottom: 8 }}>
+                    Per-Class Metrics
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
+                    {Object.entries(evalResults.per_class_metrics).map(([label, metrics]) => (
+                      <div key={label} style={{
+                        backgroundColor: 'var(--surface-2)',
+                        borderRadius: 8,
+                        padding: '12px',
+                        fontSize: 12,
+                      }}>
+                        <div style={{ fontWeight: 600, color: 'var(--text-1)', marginBottom: 4 }}>
+                          {metrics.class_name} ({label})
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, color: 'var(--text-2)' }}>
+                          <div>
+                            <div style={{ fontSize: 11, color: 'var(--text-3)' }}>Accuracy</div>
+                            <div style={{ fontWeight: 700, color: 'var(--accent)' }}>
+                              {(metrics.accuracy * 100).toFixed(1)}%
+                            </div>
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 11, color: 'var(--text-3)' }}>Precision</div>
+                            <div style={{ fontWeight: 700 }}>{(metrics.precision * 100).toFixed(1)}%</div>
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 11, color: 'var(--text-3)' }}>Recall</div>
+                            <div style={{ fontWeight: 700 }}>{(metrics.recall * 100).toFixed(1)}%</div>
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 11, color: 'var(--text-3)' }}>F1 Score</div>
+                            <div style={{ fontWeight: 700 }}>{(metrics.f1_score * 100).toFixed(1)}%</div>
+                          </div>
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4 }}>
+                          Support: {metrics.support} samples
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {evalResults && !evalResults.success && (
+            <div style={{
+              backgroundColor: 'rgba(239, 68, 68, 0.1)',
+              borderLeft: '4px solid #ef4444',
+              borderRadius: 8,
+              padding: '12px 16px',
+              color: '#ef4444',
+              fontSize: 13,
+            }}>
+              ❌ {evalResults.error || 'Evaluation failed'}
+            </div>
+          )}
+
+          {/* Progress logs */}
+          {(evaluating || evalResults) && (
+            <>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-2)', marginTop: 8 }}>
+                Evaluation Logs
+              </div>
+              <div style={{
+                backgroundColor: 'var(--surface-2)',
+                borderRadius: 8,
+                padding: '12px',
+                height: 200,
+                overflowY: 'auto',
+                fontSize: 11.5,
+                fontFamily: 'monospace',
+                color: 'var(--text-2)',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              }}>
+                {logs.filter(log => log.includes('[Eval')).join('\n') || 'No logs...'}
+              </div>
+            </>
+          )}
         </div>
       )}
 

@@ -32,6 +32,8 @@ const VALID_INVOKE = new Set([
   'check-cuda-status',
   'install-cuda-pytorch',
   'cancel-cuda-install',
+  'evaluate-model',
+  'analyze-prediction',
 ]);
 
 // ── Whitelisted listener channels (main → renderer) ──────────────────────────
@@ -42,6 +44,7 @@ const VALID_ON = new Set([
   'dataset-changed',
   'cuda-install-log',
   'cuda-progress',
+  'evaluation-log',
 ]);
 
 /** Safe invoke — rejects unknown channels immediately. */
@@ -146,6 +149,28 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   /** Cancel ongoing CUDA installation. Returns { cancelled: boolean } */
   cancelCudaInstall: () => safeInvoke('cancel-cuda-install'),
+
+  // ── Model Evaluation ─────────────────────────────────────────────────────
+
+  /**
+   * Evaluate global model on test dataset.
+   * @param {object} opts - { modelPath, testDir }
+   * @returns {Promise<{ success, overall_accuracy, per_class_metrics, ... }>}
+   */
+  evaluateModel: (opts = {}) => safeInvoke('evaluate-model', opts),
+
+  /** Stream evaluation progress logs. Returns cleanup fn. */
+  onEvaluationLog: (cb) => safeOn('evaluation-log', cb),
+
+  // ── AI Analysis ──────────────────────────────────────────────────────────
+
+  /**
+   * Get Gemini AI analysis for a prediction.
+   * @param {object} opts - { predictedClass, confidence, allProbabilities }
+   * @returns {Promise<{ diagnosis, explanation, recommendations, ... }>}
+   */
+  analyzePrediction: (opts = {}) => safeInvoke('analyze-prediction', opts),
+
   // ── Dev tools ────────────────────────────────────────────────────────────
   openDevTools: () => safeInvoke('open-devtools'),
 });
