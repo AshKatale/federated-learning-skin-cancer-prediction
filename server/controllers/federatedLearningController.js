@@ -18,7 +18,7 @@ const FederatedLearning = require('../models/FederatedLearning');
 const FL_SERVER = process.env.FL_SERVER_URL || 'http://localhost:6000';
 
 /**
- * Admin: create a new round record in the DB.
+ * Admin: create a new round record in the DB and notify FL server to start training.
  * No weights are involved — this is metadata only.
  */
 const initiateRound = async (req, res) => {
@@ -45,6 +45,16 @@ const initiateRound = async (req, res) => {
       totalClients: clientList.length,
       aggregationMethod: 'FedAvg'
     });
+
+    // Notify FL server to initiate training for this round
+    try {
+      const flServerUrl = process.env.FL_SERVER_URL || 'http://localhost:6000';
+      const flRes = await axios.post(`${flServerUrl}/api/round/initiate-training`, {}, { timeout: 5000 });
+      console.log('[FL Server Response]', flRes.data);
+    } catch (flError) {
+      console.error('Warning: Could not notify FL server:', flError.message);
+      // Don't fail the round creation if FL server is unreachable
+    }
 
     res.status(201).json({ success: true, round });
   } catch (e) {
@@ -164,6 +174,41 @@ const recordClientSubmission = async (req, res) => {
   }
 };
 
+/**
+ * Called by FL server when a round completes.
+ * Updates the round record with accuracy/loss metrics and marks as 'completed'.
+ */
+const completeRound = async (req, res) => {
+  try {
+    const { roundNumber, globalModelPerformance = {} } = req.body;
+    if (!roundNumber) {
+      return res.status(400).json({ success: false, message: 'roundNumber required' });
+    }
+
+    const updated = await FederatedLearning.findOneAndUpdate(
+      { roundNumber },
+      {
+        status: 'completed',
+        roundEndTime: new Date(),
+        globalModelPerformance: {
+          accuracy: globalModelPerformance.accuracy || 0,
+          loss: globalModelPerformance.loss || 0,
+        },
+      },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ success: false, message: 'Round not found' });
+    }
+
+    res.json({ success: true, message: 'Round completed', round: updated });
+  } catch (e) {
+    console.error('Error completing round:', e);
+    res.status(500).json({ success: false, message: e.message });
+  }
+};
+
 module.exports = {
   getAllRounds,
   getRoundDetails,
@@ -171,4 +216,5 @@ module.exports = {
   getAnalytics,
   recordClientSubmission,
   initiateRound,
+  completeRound,
 };

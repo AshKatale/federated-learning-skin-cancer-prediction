@@ -14,6 +14,7 @@ const {
   getTrainingStatus,
   recordClientSubmission,
   initiateRound,
+  completeRound,
 } = require('../controllers/federatedLearningController');
 const { protectRoute, authorize } = require('../middleware/auth');
 
@@ -29,6 +30,9 @@ router.get('/:trainingId/status', getTrainingStatus);
 
 // Admin: manually initiate a new round (creates DB record, does NOT touch weights)
 router.post('/rounds/initiate', authorize('admin'), initiateRound);
+
+// FL Server calls this when round completes (updates analytics)
+router.post('/rounds/complete', completeRound);
 
 // Desktop client calls this to log that it submitted weights to FL server
 // NO weights pass through here – just metadata

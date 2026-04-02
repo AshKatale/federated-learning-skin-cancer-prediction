@@ -4,6 +4,9 @@
  * Communicates with Electron main process ONLY via window.electronAPI.
  * Never imports Node.js / fs / child_process directly.
  *
+ * Uses FLContext for persistent state across page navigation.
+ * Local state (UI-only) is managed here.
+ *
  * IPC flow:
  *   [Button click]
  *     → window.electronAPI.trainModel(opts)
@@ -14,6 +17,7 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useFLContext } from '../context/FLContext';
 
 // ── Detect Electron environment ───────────────────────────────────────────────
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
@@ -31,38 +35,41 @@ const STATUS_COLOR = { running: '#22c55e', offline: '#ef4444', unknown: '#94a3b8
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function FLControlPanel() {
-  // ── State ──────────────────────────────────────────────────────────────────
-  const [appStatus,     setAppStatus]     = useState(null);
-  const [flStatus,      setFlStatus]      = useState(null);
-  const [datasetPath,   setDatasetPath]   = useState('');
+  // ── Global persistent state from context ───────────────────────────────────
+  const flContext = useFLContext();
+  const {
+    datasetPath, setDatasetPath,
+    logs, addLog, clearLogs,
+    clientId: contextClientId, setClientId,
+    flStatus: contextFlStatus, setFlStatus,
+    appStatus: contextAppStatus, setAppStatus,
+    training: contextTraining, setTraining,
+  } = flContext;
+
+  // ── Local UI-only state (not persisted across navigation) ─────────────────
   const [imagePath,     setImagePath]     = useState('');
   const [prediction,    setPrediction]    = useState(null);
-  const [logs,          setLogs]          = useState([]);
-  const [training,      setTraining]      = useState(false);
   const [predicting,    setPredicting]    = useState(false);
   const [epochs,        setEpochs]        = useState(1);
-  const [clientId,      setClientId]      = useState('1');
   const [panelTab,      setPanelTab]      = useState('train'); // 'train' | 'predict' | 'status' | 'evaluate'
-  const [device,        setDevice]        = useState('cpu');   // NEW: 'cpu' or 'cuda'
-  const [cudaStatus,    setCudaStatus]    = useState(null);    // NEW: CUDA availability info
-  const [showCudaModal, setShowCudaModal] = useState(false);   // NEW: CUDA install prompt
-  const [installingCuda, setInstallingCuda] = useState(false); // NEW: CUDA installation in progress
-  const [cudaLogs,      setCudaLogs]      = useState([]);      // NEW: CUDA install logs
-  const [testDir,       setTestDir]        = useState('');     // NEW: Test dataset path
-  const [evaluating,    setEvaluating]    = useState(false);   // NEW: Evaluation in progress
-  const [evalResults,   setEvalResults]   = useState(null);    // NEW: Evaluation results
-  const [cudaProgress,  setCudaProgress]  = useState(null);    // NEW: CUDA download progress { downloaded, total, percentage }
+  const [device,        setDevice]        = useState('cpu');   // 'cpu' or 'cuda'
+  const [cudaStatus,    setCudaStatus]    = useState(null);    // CUDA availability info
+  const [showCudaModal, setShowCudaModal] = useState(false);   // CUDA install prompt
+  const [installingCuda, setInstallingCuda] = useState(false); // CUDA installation in progress
+  const [cudaLogs,      setCudaLogs]      = useState([]);      // CUDA install logs
+  const [testDir,       setTestDir]        = useState('');     // Test dataset path
+  const [evaluating,    setEvaluating]    = useState(false);   // Evaluation in progress
+  const [evalResults,   setEvalResults]   = useState(null);    // Evaluation results
+  const [cudaProgress,  setCudaProgress]  = useState(null);    // CUDA download progress
 
   const logsEndRef = useRef(null);
 
   // ── Generate unique client ID on mount ─────────────────────────────────────
   useEffect(() => {
     // Generate unique ID from machine hostname + random ID
-    // This ensures each desktop app instance gets a unique client ID
     const storedClientId = localStorage.getItem('fl_client_id');
     
     if (!storedClientId) {
-      // Generate new unique ID: hostname + random suffix
       const hostname = window.electronAPI?.platform || 'client';
       const randomSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
       const newClientId = `${hostname}_${randomSuffix}`;
@@ -74,19 +81,29 @@ export default function FLControlPanel() {
       setClientId(storedClientId);
       console.log(`[FL] Loaded client ID from storage: ${storedClientId}`);
     }
-  }, []);
-
-  // ── Log helper ─────────────────────────────────────────────────────────────
-  const addLog = useCallback((line) => {
-    setLogs((prev) => [...prev.slice(-300), line]); // keep last 300 lines
-  }, []);
+  }, [setClientId]);
 
   // ── Scroll logs to bottom ──────────────────────────────────────────────────
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
 
+  const hasAutoSwitched = useRef(false);
+
+  // ── Auto-switch to training tab when training starts ─────────────────────────
+  // Helps user see training status when returning from other pages
+  useEffect(() => {
+    if (contextTraining && !hasAutoSwitched.current) {
+      console.log('[FLControlPanel] Auto-switching to training tab...');
+      setPanelTab('train');
+      hasAutoSwitched.current = true;
+    } else if (!contextTraining) {
+      hasAutoSwitched.current = false; // Reset when training stops
+    }
+  }, [contextTraining]);
+
   // ── Subscribe to streaming training logs from main process ─────────────────
+  // Re-subscribes when component remounts (after page navigation)
   useEffect(() => {
     if (!api) return;
     const cleanup = api.onTrainingLog?.((line) => addLog(line));
@@ -148,6 +165,59 @@ export default function FLControlPanel() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Auto-start training when admin initiates new round ─────────────────────
+  useEffect(() => {
+    if (!api) return;
+    
+    // Start auto-training monitor (non-critical feature)
+    const startAutoTrain = async () => {
+      try {
+        if (typeof api.startAutoTraining !== 'function') {
+          console.warn('[FLControlPanel] startAutoTraining not available');
+          return;
+        }
+        const res = await api.startAutoTraining({ checkIntervalMs: 5000 });
+        console.log('[FLControlPanel] Auto-training started:', res);
+      } catch (err) {
+        console.error('[FLControlPanel] Failed to start auto-training:', err);
+      }
+    };
+
+    startAutoTrain();
+
+    // Cleanup on unmount
+    return () => {
+      if (api && typeof api.stopAutoTraining === 'function') {
+        api.stopAutoTraining().catch(() => {});
+      }
+    };
+  }, [api]);
+
+  // ── Background: Check if training is still running (survives page nav) ────
+  // Even if user navigates away, this checks every 5s if training is active
+  useEffect(() => {
+    if (!api || !contextTraining) return;
+    
+    console.log('[FLControlPanel-BG] Monitoring training status in background...');
+    
+    const monitor = setInterval(async () => {
+      try {
+        // Query app status to see if training process is still alive
+        const status = await api.getAppStatus?.();
+        if (status?.training === false && contextTraining) {
+          // Training finished but context still says it's running
+          console.log('[FLControlPanel-BG] Training completed (detection)');
+          setTraining(false);
+          addLog('[System] Training completed.');
+        }
+      } catch (err) {
+        // Silently fail - server might be unavailable
+      }
+    }, 5000);
+    
+    return () => clearInterval(monitor);
+  }, [api, contextTraining, setTraining, addLog]);
+
   // ── Poll app/FL status every 15 s ─────────────────────────────────────────
   useEffect(() => {
     if (!api) return;
@@ -162,7 +232,7 @@ export default function FLControlPanel() {
     fetch();
     const id = setInterval(fetch, 15000);
     return () => clearInterval(id);
-  }, []);
+  }, [setAppStatus, setFlStatus]);
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
@@ -186,7 +256,7 @@ export default function FLControlPanel() {
   };
 
   const handleTrain = async () => {
-    if (!api || training) return;
+    if (!api || contextTraining) return;
 
     // Check if user selected GPU but it's not available
     if (device === 'cuda' && !cudaStatus?.cuda_available) {
@@ -196,16 +266,16 @@ export default function FLControlPanel() {
 
     setTraining(true);
     setPanelTab('train');
-    setLogs([]);
-    addLog(`[Train] Starting local training  epochs=${epochs}  client=${clientId}  device=${device}`);
+    clearLogs();
+    addLog(`[Train] Starting local training  epochs=${epochs}  client=${contextClientId}  device=${device}`);
     addLog(`[Train] Dataset: ${datasetPath || '(default)'}`);
 
     try {
       const result = await api.trainModel({
         dataDir:  datasetPath || undefined,
-        clientId,
+        clientId: contextClientId,
         epochs:   Number(epochs),
-        device,   // NEW: Pass device selection
+        device,   // Pass device selection
       });
       if (result?.killed) {
         addLog('[Train] 🛑 Training stopped by user.');
@@ -368,8 +438,8 @@ export default function FLControlPanel() {
       <div className="card" style={{ padding: '12px 20px', display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
         <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-1)' }}>Services</span>
         {[
-          ['API Server',  appStatus?.server],
-          ['FL Client',   appStatus?.fl_client],
+          ['API Server',  contextAppStatus?.server],
+          ['FL Client',   contextAppStatus?.fl_client],
         ].map(([label, state]) => (
           <span key={label} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
             <span style={{
@@ -383,9 +453,15 @@ export default function FLControlPanel() {
             </span>
           </span>
         ))}
-        {flStatus && !flStatus.error && (
+        {contextTraining && (
+          <span style={{ marginLeft: 'auto', fontSize: 12, color: '#22c55e', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', display: 'inline-block', animation: 'pulse 2s infinite' }} />
+            Training in progress…
+          </span>
+        )}
+        {contextFlStatus && !contextFlStatus.error && !contextTraining && (
           <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-3)' }}>
-            FL round: <strong>{flStatus.synced_round}</strong>
+            FL round: <strong>{contextFlStatus.synced_round}</strong>
           </span>
         )}
       </div>
@@ -442,7 +518,7 @@ export default function FLControlPanel() {
               Client ID <span style={{ fontSize: 11, fontWeight: 600, color: '#059669' }}>(Auto-generated, unique per device)</span>
               <input
                 type="text"
-                value={clientId}
+                value={contextClientId}
                 onChange={(e) => setClientId(e.target.value)}
                 placeholder="auto-generated"
                 style={{
@@ -547,14 +623,14 @@ export default function FLControlPanel() {
             <button
               className="btn btn-primary"
               onClick={handleTrain}
-              disabled={training}
+              disabled={contextTraining}
               style={{ minWidth: 150 }}
             >
-              {training ? (
+              {contextTraining ? (
                 <><span className="spinner" style={{ width: 14, height: 14, marginRight: 8 }} />Training…</>
               ) : '▶ Start Training'}
             </button>
-            {training && (
+            {contextTraining && (
               <button
                 onClick={handleStopTraining}
                 style={{
@@ -570,7 +646,7 @@ export default function FLControlPanel() {
                 ■ Stop Training
               </button>
             )}
-            <button className="btn btn-secondary" onClick={handleSync} disabled={training}>
+            <button className="btn btn-secondary" onClick={handleSync} disabled={contextTraining}>
               ↻ Sync Global Model
             </button>
           </div>

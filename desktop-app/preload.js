@@ -34,6 +34,9 @@ const VALID_INVOKE = new Set([
   'cancel-cuda-install',
   'evaluate-model',
   'analyze-prediction',
+  'check-fl-round-status',
+  'start-auto-training',
+  'stop-auto-training',
 ]);
 
 // ── Whitelisted listener channels (main → renderer) ──────────────────────────
@@ -119,6 +122,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   /** Get FL client status. */
   flStatus: () => safeInvoke('fl-status'),
+
+  // ── Auto-training monitor ────────────────────────────────────────────────
+
+  /** Start monitoring for new FL rounds and auto-train when detected. */
+  startAutoTraining: (opts = {}) => safeInvoke('start-auto-training', opts),
+
+  /** Stop auto-training monitor. */
+  stopAutoTraining: () => safeInvoke('stop-auto-training'),
+
+  /** Check FL server for new rounds. Returns { success, hasNewRound, currentRound, ... } */
+  checkFlRoundStatus: (opts = {}) => safeInvoke('check-fl-round-status', opts),
 
   // ── Event listeners (main → renderer) ────────────────────────────────────
 

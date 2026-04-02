@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import AppShell from '../components/AppShell';
 import { flService } from '../services/api';
+import { useFLContext } from '../context/FLContext';
 
 const StatusBadge = ({ status }) => {
   if (status === 'completed') return <span className="badge badge-green">Completed</span>;
@@ -10,8 +11,11 @@ const StatusBadge = ({ status }) => {
 };
 
 export default function AdminDashboard() {
-  const [rounds, setRounds] = useState([]);
-  const [analytics, setAnalytics] = useState(null);
+  // Get global state from context
+  const flContext = useFLContext();
+  const { rounds, analytics, setRounds, setAnalytics } = flContext;
+  
+  // Local UI state
   const [loading, setLoading] = useState(true);
   const [initiatingRound, setInitiatingRound] = useState(false);
   const [error, setError] = useState('');
@@ -23,6 +27,10 @@ export default function AdminDashboard() {
     const user = JSON.parse(localStorage.getItem('user') || '{}');
     if (user.role !== 'admin' && user.role !== 'doctor') navigate('/dashboard');
     fetchData();
+    
+    // Poll for updates every 30 seconds (less aggressive than before)
+    const interval = setInterval(fetchData, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   const fetchData = async () => {
@@ -31,7 +39,10 @@ export default function AdminDashboard() {
         flService.getAllRounds(1, 10),
         flService.getAnalytics(),
       ]);
+      
+      // Update global state
       setRounds(roundsRes.data?.data?.rounds || roundsRes.data?.rounds || []);
+      
       const raw = analyticsRes.data?.analytics || analyticsRes.data || null;
       if (raw) {
         raw.accuracyTrend = raw.accuracyTrend || [];
@@ -45,6 +56,7 @@ export default function AdminDashboard() {
       }
     } catch (err) {
       setError('Failed to load federated learning data');
+      console.error(err);
     } finally {
       setLoading(false);
     }
@@ -55,6 +67,7 @@ export default function AdminDashboard() {
     try {
       await flService.initiateRound({ clientList: ['desktop_client_1'] });
       setError('');
+      // Refresh data immediately
       fetchData();
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to initiate round');

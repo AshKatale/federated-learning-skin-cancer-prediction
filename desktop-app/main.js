@@ -898,7 +898,132 @@ ipcMain.handle('analyze-prediction', async (_event, opts = {}) => {
     });
   });
 });
+// ── 9. Check for New FL Rounds ────────────────────────────────────────────────
 
+/**
+ * Auto-training handler: periodically checks if admin initiated a new round
+ * and automatically starts training if conditions are met.
+ * Called by FLControlPanel.jsx to set up automatic round monitoring.
+ */
+let autoTrainningIntervalId = null;
+
+ipcMain.handle('start-auto-training', async (_event, opts = {}) => {
+  const flServerUrl = opts.flServerUrl || 'http://127.0.0.1:6000';
+  const nodeServerUrl = opts.nodeServerUrl || 'http://127.0.0.1:3001';
+  const checkIntervalMs = opts.checkIntervalMs || 5000; // Check every 5 seconds
+  
+  console.log('[Auto-Train] Starting auto-training monitor...');
+  
+  // Prevent multiple intervals
+  if (autoTrainningIntervalId) {
+    clearInterval(autoTrainningIntervalId);
+  }
+
+  let lastTrainedRound = 0;
+  let checkCount = 0;
+
+  const checkAndTrain = async () => {
+    if (!axios) return;
+    
+    try {
+      // Get current round from FL server
+      const statusRes = await axios.get(`${flServerUrl}/api/round/status`, { timeout: 3000 });
+      const currentRound = statusRes.data.current_round || 0;
+      checkCount++;
+      
+      // If round number increased, start training
+      if (currentRound > lastTrainedRound) {
+        console.log(`[Auto-Train] CHECK #${checkCount}: New round detected: ${currentRound} (was ${lastTrainedRound})`);
+        lastTrainedRound = currentRound;
+        
+        // Auto-start training by calling FL client directly
+        try {
+          const trainRes = await axios.post(
+            `http://127.0.0.1:${FL_CLIENT_PORT}/api/train`,
+            {},
+            { timeout: 60000 }
+          );
+          console.log('[Auto-Train] Training started:', trainRes.data);
+          sendLog('fl-log', `[Auto-Train] Training started for round ${currentRound}`);
+        } catch (trainErr) {
+          console.error(`[Auto-Train] Failed to start training: ${trainErr.message}`);
+          sendLog('fl-log', `[Auto-Train] Training failed: ${trainErr.message}`);
+        }
+      } else {
+        // No new round yet — log this less frequently (every 6 checks = 30s)
+        if (checkCount % 6 === 0) {
+          console.log(`[Auto-Train] CHECK #${checkCount}: No new round (current=${currentRound}, lastTrained=${lastTrainedRound})`);
+        }
+      }
+    } catch (err) {
+      // Server down or error — log it
+      console.warn(`[Auto-Train] CHECK #${checkCount}: Failed to check status: ${err.message}`);
+      sendLog('fl-log', `[Auto-Train] Status check failed: ${err.message}`);
+    }
+  };
+
+  autoTrainningIntervalId = setInterval(checkAndTrain, checkIntervalMs);
+  
+  return {
+    success: true,
+    message: `Auto-training started (checking every ${checkIntervalMs}ms)`
+  };
+});
+
+ipcMain.handle('stop-auto-training', () => {
+  if (autoTrainningIntervalId) {
+    clearInterval(autoTrainningIntervalId);
+    autoTrainningIntervalId = null;
+    console.log('[Auto-Train] Auto-training stopped');
+  }
+  return { success: true };
+});
+
+/**
+ * Check FL server for new rounds and auto-trigger training if needed
+ * This enables automatic training when server initiates a new round
+ */
+ipcMain.handle('check-fl-round-status', async (_event, opts = {}) => {
+  if (!axios) {
+    return { 
+      hasNewRound: false, 
+      error: 'axios not available (offline mode)',
+      currentRound: null 
+    };
+  }
+
+  try {
+    const flServerUrl = opts.flServerUrl || 'http://127.0.0.1:6000';
+    const lastSeenRound = opts.lastSeenRound || 0;
+    
+    // Get current round status from FL server
+    const statusRes = await axios.get(`${flServerUrl}/api/round/status`, { timeout: 5000 });
+    const roundData = statusRes.data;
+    const currentRound = roundData.current_round || 0;
+    
+    console.log(`[FL-Check] Server round: ${currentRound}, Client last round: ${lastSeenRound}`);
+    
+    // New round if current > last seen
+    const hasNewRound = currentRound > lastSeenRound;
+    
+    return {
+      success: true,
+      hasNewRound,
+      currentRound,
+      secondsRemaining: roundData.seconds_remaining || 0,
+      updatesReceived: roundData.updates_received || 0,
+      lastModel: roundData.last_model,
+    };
+  } catch (err) {
+    console.error(`[FL-Check] Error checking round status: ${err.message}`);
+    return {
+      success: false,
+      hasNewRound: false,
+      error: err.message,
+      currentRound: null,
+    };
+  }
+});
 // ── 9. Misc ──────────────────────────────────────────────────────────────────
 
 ipcMain.handle('open-devtools', () => mainWindow?.webContents.openDevTools());

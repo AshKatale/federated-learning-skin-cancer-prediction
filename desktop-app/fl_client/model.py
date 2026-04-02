@@ -71,6 +71,14 @@ class SkinCancerModel:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save(self.get_state_dict(), path)
 
+    def _state_dict_to_b64(self, state_dict: dict) -> str:
+        """Convert a state_dict to base64-encoded string for transmission."""
+        import base64
+        buf = io.BytesIO()
+        torch.save(state_dict, buf)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode("utf-8")
+
     def predict(self, image: Image.Image) -> dict:
         self.net.eval()
         x = INFER_TRANSFORM(image).unsqueeze(0).to(self.device)

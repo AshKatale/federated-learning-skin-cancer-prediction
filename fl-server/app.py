@@ -49,6 +49,11 @@ round_manager = RoundManager(
 global_model = SkinCancerModel()
 aggregator = FedAvgAggregator()
 
+# ── Client Heartbeat Tracker ─────────────────────────────────────────────────
+# Track which clients are actively training in the current round
+_client_heartbeats = {}  # {round: {client_id: {status, progress, timestamp}}}
+_heartbeat_lock = threading.Lock()
+
 # Load latest saved global model weights if they exist
 _latest = round_manager.latest_model_path()
 if _latest:
@@ -80,12 +85,46 @@ def _aggregate_and_advance():
         return
 
     logger.info(f"Aggregating {len(updates)} client update(s)")
-    new_state = aggregator.fedavg(updates)
+    
+    # Get previous global state for FedProx proximal term
+    prev_state = global_model.get_state_dict()
+    
+    # Use FedProx (improved over FedAvg for non-IID data)
+    # mu=0.01 balances convergence speed and robustness to data heterogeneity
+    new_state = aggregator.fedprox(updates, global_state=prev_state, mu=0.01)
 
     global_model.set_state_dict(new_state)
     model_path = round_manager.save_global_model(global_model.get_state_dict())
+    
+    # Clear heartbeats for completed round
+    current_round = round_manager.current_round()
+    with _heartbeat_lock:
+        if current_round in _client_heartbeats:
+            del _client_heartbeats[current_round]
+    
     round_manager.advance_round(model_path=model_path)
     logger.info(f"Round complete – saved {model_path}")
+    
+    # ── Notify Node.js server of round completion for dashboard analytics ────
+    # (non-blocking; log errors but don't fail the aggregation)
+    try:
+        import requests
+        node_server_url = os.getenv("NODE_SERVER_URL", "http://localhost:3001")
+        payload = {
+            "roundNumber": current_round,
+            "globalModelPerformance": {
+                "accuracy": 0.0,  # TODO: Calculate if test dataset available
+                "loss": 0.0,
+            }
+        }
+        requests.post(
+            f"{node_server_url}/api/federated-learning/rounds/complete",
+            json=payload,
+            timeout=5
+        )
+        logger.info(f"Notified Node.js server of round {current_round} completion")
+    except Exception as e:
+        logger.warning(f"Failed to notify Node.js server: {e}")
 
 
 # Start background loop
@@ -227,6 +266,27 @@ def round_status():
     return jsonify(round_manager.status())
 
 
+@app.route("/api/round/initiate-training", methods=["POST"])
+def initiate_training():
+    """
+    Called by Node.js server when admin clicks "Start New Round".
+    Tells all clients that the current round is now accepting training submissions.
+    Clients should fetch global model and start training.
+    """
+    try:
+        current_round = round_manager.current_round()
+        logger.info(f"[Admin] Initiating training for round {current_round}")
+        return jsonify({
+            "success": True,
+            "round": current_round,
+            "should_train": True,
+            "message": f"Round {current_round} open for client training submissions"
+        }), 200
+    except Exception as e:
+        logger.error(f"Error initiating training: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/round/aggregate", methods=["POST"])
 def trigger_aggregation():
     """Manually trigger round aggregation immediately (admin endpoint)."""
@@ -245,6 +305,100 @@ def trigger_aggregation():
             "success": False,
             "error": str(e)
         }), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CLIENT HEARTBEAT MONITORING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/client/heartbeat", methods=["POST"])
+def client_heartbeat():
+    """
+    Clients send periodic heartbeats during training.
+    Body JSON:
+      {
+        "client_id": "client_win32_OZA19D",
+        "round": 1,
+        "status": "training",  // or "completed"
+        "progress": 0.45,      // 0.0 to 1.0
+        "timestamp": 1701234567.89
+      }
+    """
+    try:
+        data = request.get_json(force=True)
+        client_id = data.get("client_id", "unknown")
+        round_num = int(data.get("round", 0))
+        status = data.get("status", "training")
+        progress = float(data.get("progress", 0.0))
+        timestamp = float(data.get("timestamp", time.time()))
+        
+        # Store in nested dict: _client_heartbeats[round][client_id] = {...}
+        with _heartbeat_lock:
+            if round_num not in _client_heartbeats:
+                _client_heartbeats[round_num] = {}
+            _client_heartbeats[round_num][client_id] = {
+                "status": status,
+                "progress": min(1.0, max(0.0, progress)),
+                "timestamp": timestamp
+            }
+        
+        logger.debug(f"Heartbeat from {client_id} (round {round_num}): {progress*100:.1f}%")
+        return jsonify({"status": "received"}), 200
+    except Exception as e:
+        logger.error(f"Heartbeat processing error: {e}")
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/round/clients-status", methods=["GET"])
+def get_clients_status():
+    """
+    Dashboard / admin endpoint – get live training status of all clients.
+    Returns which clients are training, completed, or offline.
+    
+    Response JSON:
+      {
+        "current_round": 1,
+        "clients": {
+          "client_1": {
+            "status": "training",  // or "completed" or "offline"
+            "progress": 0.45,
+            "last_seen": 1701234567.89
+          },
+          ...
+        }
+      }
+    """
+    try:
+        current_round = round_manager.current_round()
+        now = time.time()
+        
+        with _heartbeat_lock:
+            heartbeats = _client_heartbeats.get(current_round, {})
+        
+        clients = {}
+        for client_id, hb in heartbeats.items():
+            seconds_since_seen = now - hb["timestamp"]
+            # Mark as offline if no heartbeat in 120 seconds
+            if seconds_since_seen > 120:
+                status = "offline"
+            else:
+                status = hb["status"]
+            
+            clients[client_id] = {
+                "status": status,
+                "progress": hb["progress"],
+                "last_seen": hb["timestamp"],
+                "seconds_ago": round(seconds_since_seen, 1)
+            }
+        
+        return jsonify({
+            "current_round": current_round,
+            "timestamp": now,
+            "clients": clients
+        }), 200
+    except Exception as e:
+        logger.error(f"Status retrieval error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":

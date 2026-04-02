@@ -21,8 +21,10 @@ Prints:
 import sys
 import os
 import json
+import requests
 import argparse
 import traceback
+import base64
 
 # ── Resolve paths ─────────────────────────────────────────────────────────────
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -42,7 +44,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='repla
 parser = argparse.ArgumentParser(description='Local FL training runner')
 parser.add_argument('--client-id',  default='1',                         help='Client identifier')
 parser.add_argument('--data-dir',   default=r'D:\Skin Cancer Dataset',   help='Dataset root folder')
-parser.add_argument('--epochs',     default='1', type=int,               help='Local training epochs')
+parser.add_argument('--epochs',     default='8', type=int,               help='Local training epochs (increased from 1 for better convergence)')
 parser.add_argument('--server',     default='127.0.0.1:8080',            help='FL server address host:port')
 parser.add_argument('--device',     default='cpu',                       help='Device to use: cpu or cuda')
 parser.add_argument('--model',      default=None,                        help='Path to initial model weights')
@@ -165,8 +167,19 @@ def main():
         log(f'[FL Training] Metadata found: {metadata_path}')
         log(f'[FL Training] Loading client data (client_id={args.client_id})…')
 
+        # Get current round from FL server
+        fl_server_url = f'http://{args.server}' if '://' not in args.server else args.server
+        current_round = 0
+        try:
+            if requests:
+                resp = requests.get(f'{fl_server_url}/api/round/status', timeout=3)
+                current_round = resp.json().get('current_round', 0)
+        except Exception as e:
+            log(f'[FL Training] Warning: Could not fetch round number: {e}')
+
         # Use LocalTrainer to prepare data
-        trainer = LocalTrainer(model_wrapper, image_dir, metadata_path)
+        trainer = LocalTrainer(model_wrapper, image_dir, metadata_path, 
+                              server_url=fl_server_url, client_id=args.client_id)
         num_samples = trainer.prepare_data(samples_per_class=999999)  # use ALL images
         log(f'[FL Training] Data loaded — {num_samples} samples')
 
@@ -184,8 +197,9 @@ def main():
     # ── Train ─────────────────────────────────────────────────────────────────
     try:
         log(f'[FL Training] Starting training for {args.epochs} epochs…')
-        loss_avg, acc, num_samples = trainer.train(epochs=args.epochs, batch_size=16, lr=args.lr)
-        log(f'[FL Training] ✅ Training complete — Loss={loss_avg:.4f} Acc={acc:.1f}%')
+        loss_avg, acc, num_samples = trainer.train(epochs=args.epochs, batch_size=16, 
+                                                    lr=args.lr, round_num=current_round)
+        log(f'[FL Training] [OK] Training complete — Loss={loss_avg:.4f} Acc={acc:.1f}%')
 
         # ── Save local weights ────────────────────────────────────────────────
         weights_dir = os.path.join(SCRIPT_DIR, 'local_weights')
@@ -193,6 +207,33 @@ def main():
         checkpoint_path = os.path.join(weights_dir, f'client_{args.client_id}_trained.pt')
         model_wrapper.save_weights(checkpoint_path)
         log(f'[FL Training] Weights saved → {checkpoint_path}')
+
+        # ── Auto-upload trained weights to FL server ──────────────────────────
+        log(f'[FL Training] Auto-uploading weights to FL server…')
+        try:
+            # Load trained weights and upload to FL server's /api/client/update endpoint
+            state_dict = torch.load(checkpoint_path, map_location='cpu')
+            weights_b64 = model_wrapper._state_dict_to_b64(state_dict)
+            
+            fl_server_url = f'http://{args.server}' if '://' not in args.server else args.server
+            upload_response = requests.post(
+                f'{fl_server_url}/api/client/update',
+                json={
+                    'client_id': args.client_id,
+                    'round': current_round,
+                    'num_samples': num_samples,
+                    'weights_b64': weights_b64,
+                },
+                timeout=30
+            )
+            
+            if upload_response.status_code == 200:
+                log(f'[FL Training] ✓ Weights uploaded successfully')
+            else:
+                log(f'[FL Training] ⚠ Upload response: {upload_response.status_code}')
+                log(f'[FL Training] Response: {upload_response.text}')
+        except Exception as upload_err:
+            log(f'[FL Training] ⚠ Upload failed (non-fatal): {upload_err}')
 
         result = {
             'success':      True,
