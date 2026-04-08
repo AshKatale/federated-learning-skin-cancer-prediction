@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DermaAI — Federated Skin Cancer Detection</title>
+  <meta name="description" content="Privacy-preserving federated learning for clinical-grade skin cancer detection." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <style>
+    /* ── Reset & Base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg-deep:   #0d1117;
+      --bg-card:   #161b27;
+      --bg-card2:  #1a2030;
+      --border:    rgba(255,255,255,0.07);
+      --border-h:  rgba(255,255,255,0.14);
+      --primary:   #2563eb;
+      --primary-g: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+      --accent:    #10b981;
+      --warn:      #f59e0b;
+      --text-1:    #f1f5f9;
+      --text-2:    #94a3b8;
+      --text-3:    #64748b;
+      --radius-sm: 10px;
+      --radius:    14px;
+      --radius-lg: 20px;
+    }
+    html { font-size: 15px; scroll-behavior: smooth; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-deep);
+      color: var(--text-1);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      height: 100vh;
+      overflow: hidden;
+      user-select: none;
+      /* Desktop app: no scrollbars on body */
+    }
+
+    /* ── Title bar drag region ── */
+    .titlebar {
+      height: 38px;
+      background: rgba(13,17,23,0.95);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px 0 12px;
+      -webkit-app-region: drag;
+      position: fixed; top: 0; left: 0; right: 0;
+      z-index: 9999;
+    }
+    .titlebar-brand {
+      display: flex; align-items: center; gap: 8px;
+      -webkit-app-region: no-drag;
+    }
+    .titlebar-icon {
+      width: 18px; height: 18px;
+      background: var(--primary-g);
+      border-radius: 5px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .titlebar-icon svg { width: 11px; height: 11px; stroke: #fff; fill: none; }
+    .titlebar-title { font-size: 12.5px; font-weight: 600; color: var(--text-2); letter-spacing: 0.01em; }
+    .titlebar-version {
+      font-size: 10.5px; color: var(--text-3);
+      background: rgba(255,255,255,0.05);
+      padding: 2px 8px; border-radius: 100px;
+      border: 1px solid var(--border);
+    }
+    .titlebar-controls { display: flex; gap: 6px; -webkit-app-region: no-drag; }
+    .tb-btn {
+      width: 12px; height: 12px; border-radius: 50%;
+      border: none; cursor: pointer;
+      transition: filter 0.15s;
+    }
+    .tb-btn:hover { filter: brightness(1.3); }
+    .tb-btn.close   { background: #ff5f56; }
+    .tb-btn.min     { background: #ffbd2e; }
+    .tb-btn.maxim   { background: #27c93f; }
+    /* reversed for Windows */
+    .titlebar-controls { flex-direction: row-reverse; }
+
+    /* ── Main Layout ── */
+    .app {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      height: 100vh;
+      margin-top: 38px;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      background: rgba(13,17,23,0.9);
+      border-right: 1px solid var(--border);
+      display: flex; flex-direction: column;
+      padding: 24px 0;
+      overflow-y: auto;
+    }
+    .sidebar-logo {
+      display: flex; align-items: center; gap: 10px;
+      padding: 0 18px 24px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px;
+    }
+    .logo-icon {
+      width: 36px; height: 36px;
+      background: var(--primary-g);
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 4px 16px rgba(37,99,235,0.4);
+      flex-shrink: 0;
+    }
+    .logo-icon svg { width: 18px; height: 18px; stroke: #fff; fill: none; }
+    .logo-text { font-size: 17px; font-weight: 800; color: var(--text-1); letter-spacing: -0.02em; }
+    .logo-sub { font-size: 10.5px; color: var(--text-3); margin-top: 1px; }
+
+    .sidebar-section { padding: 0 10px; margin-bottom: 6px; }
+    .sidebar-label {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.1em; color: var(--text-3);
+      padding: 4px 10px 8px;
+    }
+    .sidebar-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 12px; border-radius: var(--radius-sm);
+      cursor: pointer; transition: all 0.2s;
+      font-size: 13.5px; font-weight: 500; color: var(--text-2);
+      position: relative;
+    }
+    .sidebar-item:hover { background: rgba(255,255,255,0.04); color: var(--text-1); }
+    .sidebar-item.active {
+      background: rgba(37,99,235,0.12);
+      color: #60a5fa;
+    }
+    .sidebar-item.active::before {
+      content: '';
+      position: absolute; left: 0; top: 6px; bottom: 6px;
+      width: 3px; border-radius: 3px;
+      background: var(--primary-g);
+    }
+    .sidebar-item svg { width: 16px; height: 16px; stroke: currentColor; fill: none; flex-shrink: 0; opacity: 0.8; }
+    .sidebar-badge {
+      margin-left: auto;
+      font-size: 10px; font-weight: 700;
+      background: rgba(37,99,235,0.2);
+      color: #60a5fa;
+      padding: 1px 7px; border-radius: 100px;
+    }
+    .sidebar-badge.green { background: rgba(16,185,129,0.15); color: #34d399; }
+
+    .sidebar-spacer { flex: 1; }
+    .sidebar-footer { padding: 16px 10px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
+
+    /* ── Main Landing Panel ── */
+    .main-panel {
+      display: flex; flex-direction: column;
+      overflow-y: auto;
+      background: var(--bg-deep);
+      position: relative;
+    }
+
+    /* Hero area */
+    .hero-panel {
+      flex: 1;
+      display: flex; align-items: center;
+      padding: 48px 52px;
+      position: relative;
+      overflow: hidden;
+      min-height: calc(100vh - 38px - 200px);
+    }
+    .hero-bg-glow {
+      position: absolute;
+      top: -200px; right: -200px;
+      width: 600px; height: 600px;
+      background: radial-gradient(ellipse, rgba(37,99,235,0.12) 0%, transparent 60%);
+      pointer-events: none;
+    }
+    .hero-bg-glow2 {
+      position: absolute;
+      bottom: -100px; left: -100px;
+      width: 400px; height: 400px;
+      background: radial-gradient(ellipse, rgba(124,58,237,0.08) 0%, transparent 60%);
+      pointer-events: none;
+    }
+
+    .hero-content { flex: 1; max-width: 480px; position: relative; z-index: 2; }
+    .hero-tag {
+      display: inline-flex; align-items: center; gap: 7px;
+      background: rgba(37,99,235,0.1);
+      border: 1px solid rgba(37,99,235,0.25);
+      color: #93c5fd;
+      font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+      padding: 5px 14px; border-radius: 100px;
+      margin-bottom: 20px;
+      animation: fadeUp 0.5s ease both;
+    }
+    .hero-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #60a5fa;
+      box-shadow: 0 0 8px #60a5fa;
+      animation: pulse-dot 2s infinite;
+    }
+    @keyframes pulse-dot {
+      0%,100% { box-shadow: 0 0 6px #60a5fa; }
+      50% { box-shadow: 0 0 16px #60a5fa; }
+    }
+
+    .hero-title {
+      font-size: 38px; font-weight: 900;
+      letter-spacing: -0.035em; line-height: 1.1;
+      color: #f8fafc;
+      margin-bottom: 16px;
+      animation: fadeUp 0.5s 0.1s ease both;
+    }
+    .hero-title .grad {
+      background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 60%, #34d399 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .hero-desc {
+      font-size: 15px; color: var(--text-2); line-height: 1.75;
+      margin-bottom: 32px;
+      animation: fadeUp 0.5s 0.2s ease both;
+    }
+    .hero-actions {
+      display: flex; gap: 12px; flex-wrap: wrap;
+      animation: fadeUp 0.5s 0.3s ease both;
+    }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 11px 22px; border-radius: 12px;
+      font-family: inherit; font-size: 14px; font-weight: 600;
+      border: none; cursor: pointer; transition: all 0.2s;
+      text-decoration: none;
+    }
+    .btn-primary {
+      background: var(--primary-g);
+      color: #fff;
+      box-shadow: 0 4px 18px rgba(37,99,235,0.4);
+    }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(37,99,235,0.55); }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-secondary {
+      background: rgba(255,255,255,0.05);
+      color: var(--text-2);
+      border: 1px solid var(--border-h);
+    }
+    .btn-secondary:hover { background: rgba(255,255,255,0.09); color: var(--text-1); }
+    .btn svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2.5; }
+
+    /* Status chips */
+    .hero-status {
+      display: flex; gap: 10px; margin-top: 28px;
+      animation: fadeUp 0.5s 0.4s ease both;
+      flex-wrap: wrap;
+    }
+    .status-chip {
+      display: flex; align-items: center; gap: 6px;
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 8px; padding: 6px 12px;
+      font-size: 12px; color: var(--text-2);
+    }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; }
+    .status-dot.green { background: #34d399; box-shadow: 0 0 8px #34d399; }
+    .status-dot.blue  { background: #60a5fa; box-shadow: 0 0 8px #60a5fa; }
+    .status-dot.yellow { background: #fbbf24; box-shadow: 0 0 8px #fbbf24; }
+
+    /* Hero right — visual cards */
+    .hero-visual {
+      flex-shrink: 0; width: 320px;
+      position: relative;
+      animation: fadeUp 0.7s 0.2s ease both;
+    }
+
+    .v-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+    }
+    .v-card-main { animation: float-slow 7s ease-in-out infinite; }
+    @keyframes float-slow {
+      0%,100% { transform: translateY(0); }
+      50% { transform: translateY(-8px); }
+    }
+
+    .v-card-header {
+      display: flex; align-items: center; gap: 8px;
+      margin-bottom: 14px; font-size: 11px; color: var(--text-3); font-weight: 500;
+    }
+    .v-dot { width: 9px; height: 9px; border-radius: 50%; }
+
+    .v-scan-area {
+      height: 120px;
+      background: linear-gradient(135deg, rgba(37,99,235,0.06), rgba(124,58,237,0.06));
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      position: relative; overflow: hidden;
+      margin-bottom: 14px;
+    }
+    .v-scan-ring {
+      width: 60px; height: 60px; border-radius: 50%;
+      border: 1.5px solid rgba(37,99,235,0.35);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .v-scan-ring svg { width: 26px; height: 26px; stroke: #60a5fa; fill: none; }
+    .v-scan-line {
+      position: absolute; top: 0; left: 0; right: 0;
+      height: 1.5px;
+      background: linear-gradient(90deg, transparent, #60a5fa80, transparent);
+      animation: scan-line 2.5s linear infinite;
+    }
+    @keyframes scan-line { 0% { top:0; opacity:0; } 10% { opacity:1; } 90% { opacity:1; } 100% { top:100%; opacity:0; } }
+
+    .v-result-row {
+      display: flex; justify-content: space-between;
+      font-size: 12px; color: var(--text-2); margin-bottom: 5px;
+    }
+    .v-result-pct { font-weight: 700; }
+    .pct-green { color: #34d399; }
+    .pct-yellow { color: #fbbf24; }
+    .v-bar { height: 5px; background: rgba(255,255,255,0.05); border-radius: 3px; overflow: hidden; margin-bottom: 7px; }
+    .v-bar-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
+    .v-risk {
+      margin-top: 8px;
+      display: inline-flex; align-items: center; gap: 6px;
+      background: rgba(52,211,153,0.1); color: #34d399;
+      border: 1px solid rgba(52,211,153,0.2);
+      padding: 4px 12px; border-radius: 100px; font-size: 11px; font-weight: 700;
+    }
+
+    /* Floating chips */
+    .v-chip {
+      position: absolute;
+      background: var(--bg-card2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 14px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .v-chip-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .v-chip-icon svg { width: 16px; height: 16px; stroke: currentColor; fill: none; }
+    .v-chip-icon.blue { background: rgba(37,99,235,0.15); color: #60a5fa; }
+    .v-chip-icon.green { background: rgba(16,185,129,0.15); color: #34d399; }
+    .v-chip-title { font-size: 12px; font-weight: 700; color: var(--text-1); }
+    .v-chip-sub { font-size: 10.5px; color: var(--text-3); }
+    .v-chip-fl { top: -40px; right: -40px; animation: float-slow 6s 0.5s ease-in-out infinite; }
+    .v-chip-priv { bottom: -36px; right: -30px; animation: float-slow 7s 1.5s ease-in-out infinite; }
+
+    /* ── Bottom Stats Bar ── */
+    .stats-bar {
+      display: grid; grid-template-columns: repeat(4, 1fr);
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+      background: var(--bg-card);
+    }
+    .stat-item {
+      padding: 18px 24px;
+      border-right: 1px solid var(--border);
+      transition: background 0.2s;
+    }
+    .stat-item:last-child { border-right: none; }
+    .stat-item:hover { background: rgba(255,255,255,0.02); }
+    .stat-num {
+      font-size: 26px; font-weight: 900;
+      letter-spacing: -0.03em;
+      background: var(--primary-g);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .stat-lbl { font-size: 11px; color: var(--text-3); font-weight: 500; margin-top: 3px; }
+
+    /* ── Feature pills below hero ── */
+    .feature-section {
+      padding: 32px 52px;
+      border-top: 1px solid var(--border);
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+      flex-shrink: 0;
+    }
+    .feature-pill {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px 20px;
+      display: flex; align-items: flex-start; gap: 14px;
+      transition: all 0.25s;
+      cursor: default;
+    }
+    .feature-pill:hover { border-color: rgba(37,99,235,0.35); background: rgba(37,99,235,0.04); transform: translateY(-2px); }
+    .fp-icon {
+      width: 40px; height: 40px; border-radius: 10px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(135deg, rgba(37,99,235,0.15), rgba(124,58,237,0.15));
+      border: 1px solid rgba(37,99,235,0.15);
+    }
+    .fp-icon svg { width: 20px; height: 20px; stroke: #60a5fa; fill: none; }
+    .fp-text h4 { font-size: 13.5px; font-weight: 700; color: var(--text-1); margin-bottom: 4px; }
+    .fp-text p { font-size: 12px; color: var(--text-3); line-height: 1.55; }
+
+    /* ── Animations ── */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(18px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
+  </style>
+</head>
+<body>
+
+<!-- ── Title Bar (Electron custom) ── -->
+<div class="titlebar">
+  <div class="titlebar-controls">
+    <button class="tb-btn close"  onclick="window.close && window.close()" title="Close"></button>
+    <button class="tb-btn min"    onclick="electronAPI && electronAPI.minimize && electronAPI.minimize()" title="Minimize"></button>
+    <button class="tb-btn maxim"  onclick="electronAPI && electronAPI.maximize && electronAPI.maximize()" title="Maximize"></button>
+  </div>
+  <div class="titlebar-brand">
+    <div class="titlebar-icon">
+      <svg viewBox="0 0 24 24" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 9V5a2 2 0 012-2h4M15 3h4a2 2 0 012 2v4M21 15v4a2 2 0 01-2 2h-4M9 21H5a2 2 0 01-2-2v-4"/>
+        <circle cx="12" cy="12" r="3"/>
+      </svg>
+    </div>
+    <span class="titlebar-title">DermaAI Desktop</span>
+  </div>
+  <span class="titlebar-version">v1.0.0 · FL Edition</span>
+</div>
+
+<!-- ── App Shell ── -->
+<div class="app">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-icon">
+        <svg viewBox="0 0 24 24" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3 9V5a2 2 0 012-2h4M15 3h4a2 2 0 012 2v4M21 15v4a2 2 0 01-2 2h-4M9 21H5a2 2 0 01-2-2v-4"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+      </div>
+      <div>
+        <div class="logo-text">DermaAI</div>
+        <div class="logo-sub">Federated Learning</div>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Detection</div>
+      <div class="sidebar-item active">
+        <svg viewBox="0 0 24 24"><path d="M3 9V5a2 2 0 012-2h4M15 3h4a2 2 0 012 2v4M21 15v4a2 2 0 01-2 2h-4M9 21H5a2 2 0 01-2-2v-4"/><circle cx="12" cy="12" r="3"/></svg>
+        Dashboard
+      </div>
+      <div class="sidebar-item">
+        <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+        Analyze Image
+      </div>
+      <div class="sidebar-item">
+        <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        Predictions
+        <span class="sidebar-badge">24</span>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Federated Learning</div>
+      <div class="sidebar-item">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M12 7v4M5 17l7-6M19 17l-7-6"/></svg>
+        FL Training
+        <span class="sidebar-badge green">Live</span>
+      </div>
+      <div class="sidebar-item">
+        <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        Model Metrics
+      </div>
+      <div class="sidebar-item">
+        <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+        Dataset Manager
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">System</div>
+      <div class="sidebar-item">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 010 14.14M4.93 4.93a10 10 0 000 14.14"/></svg>
+        CUDA Setup
+      </div>
+      <div class="sidebar-item">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        About
+      </div>
+    </div>
+
+    <div class="sidebar-spacer"></div>
+
+    <div class="sidebar-footer">
+      <div class="sidebar-item">
+        <svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        Profile
+      </div>
+      <div class="sidebar-item">
+        <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+        Sign Out
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-panel">
+
+    <!-- Hero -->
+    <section class="hero-panel">
+      <div class="hero-bg-glow"></div>
+      <div class="hero-bg-glow2"></div>
+
+      <div class="hero-content">
+        <div class="hero-tag">
+          <span class="hero-dot"></span>
+          Privacy-Preserving · HIPAA Ready
+        </div>
+
+        <h1 class="hero-title">
+          Clinical AI for<br>
+          <span class="grad">Skin Cancer</span><br>
+          Detection
+        </h1>
+
+        <p class="hero-desc">
+          Run AI-powered dermoscopy analysis locally on your machine.
+          Participate in federated learning rounds without your data ever leaving the premises.
+        </p>
+
+        <div class="hero-actions">
+          <button class="btn btn-primary" id="btn-analyze" onclick="navigateTo('analyze')">
+            <svg viewBox="0 0 24 24" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9V5a2 2 0 012-2h4M15 3h4a2 2 0 012 2v4M21 15v4a2 2 0 01-2 2h-4M9 21H5a2 2 0 01-2-2v-4"/><circle cx="12" cy="12" r="3"/></svg>
+            Analyze Image
+          </button>
+          <button class="btn btn-secondary" id="btn-fl-training" onclick="navigateTo('fl')">
+            <svg viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M12 7v4M5 17l7-6M19 17l-7-6"/></svg>
+            FL Training
+          </button>
+        </div>
+
+        <div class="hero-status">
+          <div class="status-chip">
+            <span class="status-dot green"></span>
+            FL Client Active
+          </div>
+          <div class="status-chip">
+            <span class="status-dot blue"></span>
+            GPU Detected
+          </div>
+          <div class="status-chip">
+            <span class="status-dot yellow"></span>
+            Round 42 Pending
+          </div>
+        </div>
+      </div>
+
+      <!-- Visual -->
+      <div class="hero-visual">
+        <div class="v-card v-card-main">
+          <div class="v-card-header">
+            <div class="v-dot" style="background:#ef4444"></div>
+            <div class="v-dot" style="background:#f59e0b"></div>
+            <div class="v-dot" style="background:#27c93f"></div>
+            Inference · Live
+          </div>
+
+          <div class="v-scan-area">
+            <div class="v-scan-ring">
+              <svg viewBox="0 0 24 24" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 9V5a2 2 0 012-2h4M15 3h4a2 2 0 012 2v4M21 15v4a2 2 0 01-2 2h-4M9 21H5a2 2 0 01-2-2v-4"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+            </div>
+            <div class="v-scan-line"></div>
+          </div>
+
+          <div>
+            <div class="v-result-row">
+              <span>Melanocytic Nevi</span>
+              <span class="v-result-pct pct-green">87.3%</span>
+            </div>
+            <div class="v-bar"><div class="v-bar-fill" style="width:87%;background:#10b981"></div></div>
+            <div class="v-result-row">
+              <span>Melanoma</span>
+              <span class="v-result-pct pct-yellow">9.2%</span>
+            </div>
+            <div class="v-bar"><div class="v-bar-fill" style="width:9%;background:#f59e0b"></div></div>
+            <div class="v-risk">🟢 Low Risk · Confidence High</div>
+          </div>
+        </div>
+
+        <!-- Floating chips -->
+        <div class="v-chip v-chip-fl">
+          <div class="v-chip-icon blue">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M12 7v4M5 17l7-6M19 17l-7-6"/></svg>
+          </div>
+          <div>
+            <div class="v-chip-title">FL Round #42</div>
+            <div class="v-chip-sub">12 nodes · 94.8% acc</div>
+          </div>
+        </div>
+
+        <div class="v-chip v-chip-priv">
+          <div class="v-chip-icon green">
+            <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          </div>
+          <div>
+            <div class="v-chip-title">Data Secured</div>
+            <div class="v-chip-sub">Zero upload · Local only</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Feature Pills -->
+    <section class="feature-section">
+      <div class="feature-pill">
+        <div class="fp-icon">
+          <svg viewBox="0 0 24 24" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+          </svg>
+        </div>
+        <div class="fp-text">
+          <h4>GPU Accelerated</h4>
+          <p>CUDA 12.1 support. Inference in &lt;1s on NVIDIA GPUs.</p>
+        </div>
+      </div>
+      <div class="feature-pill">
+        <div class="fp-icon">
+          <svg viewBox="0 0 24 24" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          </svg>
+        </div>
+        <div class="fp-text">
+          <h4>7 Cancer Classes</h4>
+          <p>HAM10000 fine-tuned EfficientNet-B3 with per-class metrics.</p>
+        </div>
+      </div>
+      <div class="feature-pill">
+        <div class="fp-icon">
+          <svg viewBox="0 0 24 24" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+        </div>
+        <div class="fp-text">
+          <h4>Air-Gapped Privacy</h4>
+          <p>Runs fully offline. Only gradient deltas sync with FL server.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Stats Bar -->
+    <div class="stats-bar">
+      <div class="stat-item">
+        <div class="stat-num" id="c-acc">94%</div>
+        <div class="stat-lbl">Global Model Accuracy</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-num" id="c-rounds">42</div>
+        <div class="stat-lbl">FL Rounds Completed</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-num" id="c-clients">12</div>
+        <div class="stat-lbl">Active Clients</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-num" id="c-preds">50K+</div>
+        <div class="stat-lbl">Scans Analyzed</div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+  // Link buttons to app navigation (when Electron renderer loads the React app)
+  function navigateTo(section) {
+    // If running inside Electron with the React app loaded, navigate
+    if (window.location.href.includes('localhost')) {
+      window.location.href = section === 'fl' ? '/fl' : '/dashboard';
+    }
+  }
+
+  // Animate stat counters on load
+  function animateCounter(el, target, suffix, duration) {
+    const start = performance.now();
+    const run = (now) => {
+      const elapsed = now - start;
+      const progress = Math.min(elapsed / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      el.textContent = Math.floor(eased * target).toLocaleString() + suffix;
+      if (progress < 1) requestAnimationFrame(run);
+    };
+    requestAnimationFrame(run);
+  }
+
+  window.addEventListener('DOMContentLoaded', () => {
+    setTimeout(() => {
+      animateCounter(document.getElementById('c-rounds'), 42, '', 1800);
+      animateCounter(document.getElementById('c-clients'), 12, '', 1400);
+    }, 500);
+  });
+</script>
+</body>
+</html>

@@ -15,6 +15,7 @@ const {
   recordClientSubmission,
   initiateRound,
   completeRound,
+  stopRound,
 } = require('../controllers/federatedLearningController');
 const { protectRoute, authorize } = require('../middleware/auth');
 
@@ -30,6 +31,9 @@ router.get('/:trainingId/status', getTrainingStatus);
 
 // Admin: manually initiate a new round (creates DB record, does NOT touch weights)
 router.post('/rounds/initiate', authorize('admin'), initiateRound);
+
+// Admin: stop an ongoing round
+router.post('/rounds/stop', authorize('admin'), stopRound);
 
 // FL Server calls this when round completes (updates analytics)
 router.post('/rounds/complete', completeRound);

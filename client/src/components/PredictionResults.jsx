@@ -1,5 +1,16 @@
 import React, { useState, useEffect } from 'react';
 
+// Numeric ID to class abbreviation mapping (HAM10000 dataset)
+const NUMERIC_CLASS_MAP = {
+  '0': 'nv',
+  '1': 'mel',
+  '2': 'bkl',
+  '3': 'bcc',
+  '4': 'akiec',
+  '5': 'vasc',
+  '6': 'df'
+};
+
 const CLASS_NAMES_MAP = {
   'akiec': 'Actinic Keratosis',
   'bcc': 'Basal Cell Carcinoma',
@@ -10,7 +21,17 @@ const CLASS_NAMES_MAP = {
   'vasc': 'Vascular Lesion'
 };
 
-const getFullClassName = (classId) => CLASS_NAMES_MAP[classId] || classId;
+// Convert numeric ID to abbreviation, then to full name
+const normalizeClassId = (classId) => {
+  const id = String(classId);
+  const abbrev = NUMERIC_CLASS_MAP[id] || id;
+  return abbrev;
+};
+
+const getFullClassName = (classId) => {
+  const normalized = normalizeClassId(classId);
+  return CLASS_NAMES_MAP[normalized] || normalized;
+};
 
 const getConfidenceColor = (c) => {
   if (c > 0.8) return 'var(--accent)';
@@ -22,6 +43,21 @@ const getRiskLevel = (c) => {
   if (c > 0.8) return { label: '✓ Low Risk', cls: 'low' };
   if (c > 0.6) return { label: '⚠ Moderate Risk', cls: 'medium' };
   return { label: '✕ High Risk', cls: 'high' };
+};
+
+const CONDITION_DESCRIPTIONS = {
+  'akiec': 'Actinic Keratosis (Solar Keratosis) - A precancerous growth caused by sun exposure. Early detection and treatment are important to prevent progression to squamous cell carcinoma.',
+  'bcc': 'Basal Cell Carcinoma (BCC) - The most common type of skin cancer. It typically grows slowly and rarely spreads, but requires prompt treatment.',
+  'bkl': 'Benign Keratosis - A common, non-cancerous growth on the skin. Usually harmless and requires no treatment unless for cosmetic reasons.',
+  'df': 'Dermatofibroma - A benign skin growth, usually small and firm. Common on the lower legs and arms. Non-cancerous and typically does not require treatment.',
+  'mel': 'Melanoma - The most serious type of skin cancer. Early detection significantly improves treatment outcomes. Should be evaluated by a dermatologist immediately.',
+  'nv': 'Nevus (Mole) - A common, benign skin growth. Most nevi are harmless, but changes in size, shape, or color should be monitored.',
+  'vasc': 'Vascular Lesion - A growth of blood vessels on the skin. Benign but may be removed for cosmetic or medical reasons.'
+};
+
+const getConditionDescription = (classId) => {
+  const normalized = normalizeClassId(classId);
+  return CONDITION_DESCRIPTIONS[normalized] || 'Unable to determine condition. Consult a dermatologist for diagnosis.';
 };
 
 export default function PredictionResults({ prediction }) {
@@ -47,7 +83,7 @@ export default function PredictionResults({ prediction }) {
         }
 
         const result = await window.electronAPI.analyzePrediction({
-          predictedClass: prediction.class_id || prediction.classId || 'bkl',
+          predictedClass: normalizeClassId(prediction.class_id || prediction.classId || 'bkl'),
           confidence: confidence,
           allProbabilities: prediction.all_probabilities || {}
         });
@@ -72,13 +108,24 @@ export default function PredictionResults({ prediction }) {
             Analysis Complete
           </div>
           <div style={{ fontSize: 22, fontWeight: 800, color: 'var(--text-1)', letterSpacing: '-0.01em' }}>
-            {prediction.class_name || prediction.className}
+            {getFullClassName(prediction.class_id || prediction.classId)}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>
+            Detected: <span style={{ fontFamily: 'var(--mono)', fontWeight: 600 }}>{normalizeClassId(prediction.class_id || prediction.classId)}</span>
           </div>
         </div>
         <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
           <circle cx="12" cy="12" r="10"/>
           <polyline points="9 12 11 14 15 10"/>
         </svg>
+      </div>
+
+      {/* Condition Description */}
+      <div style={{ backgroundColor: 'var(--bg)', borderRadius: 'var(--radius)', padding: '14px 16px', borderLeft: '4px solid var(--accent)' }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-2)', marginBottom: 6 }}>What This Means</div>
+        <div style={{ fontSize: 13, color: 'var(--text-1)', lineHeight: '1.5' }}>
+          {getConditionDescription(prediction.class_id || prediction.classId)}
+        </div>
       </div>
 
       {/* Risk Banner */}
@@ -180,7 +227,7 @@ export default function PredictionResults({ prediction }) {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {sortedProbs.map(([cls, prob]) => (
                   <div key={cls} style={{ display: 'grid', gridTemplateColumns: '140px 1fr 52px', alignItems: 'center', gap: 10 }}>
-                    <span style={{ fontSize: 12.5, color: 'var(--text-2)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={getFullClassName(cls)}>
+                    <span style={{ fontSize: 12.5, color: 'var(--text-2)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={`${getFullClassName(cls)} (${cls})`}>
                       {getFullClassName(cls)}
                     </span>
                     <div className="prob-bar-wrap">
@@ -198,9 +245,9 @@ export default function PredictionResults({ prediction }) {
             <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-2)', marginBottom: 10 }}>Prediction Details</div>
             <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '6px 12px', fontSize: 13 }}>
               <span style={{ color: 'var(--text-3)', fontWeight: 500 }}>Classification</span>
-              <span style={{ color: 'var(--text-1)', fontWeight: 600 }}>{prediction.class_name || prediction.className}</span>
+              <span style={{ color: 'var(--text-1)', fontWeight: 600 }}>{getFullClassName(prediction.class_id || prediction.classId)}</span>
               <span style={{ color: 'var(--text-3)', fontWeight: 500 }}>Class ID</span>
-              <span style={{ color: 'var(--text-1)', fontFamily: 'var(--mono)' }}>{prediction.class_id}</span>
+              <span style={{ color: 'var(--text-1)', fontFamily: 'var(--mono)' }}>{normalizeClassId(prediction.class_id)} (ID: {prediction.class_id})</span>
               <span style={{ color: 'var(--text-3)', fontWeight: 500 }}>Confidence</span>
               <span style={{ color: 'var(--text-1)', fontWeight: 600 }}>{confidencePct}%</span>
               <span style={{ color: 'var(--text-3)', fontWeight: 500 }}>Score</span>

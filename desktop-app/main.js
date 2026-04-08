@@ -444,9 +444,9 @@ function createWindow(ip) {
     backgroundColor: '#0f1117',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
-      nodeIntegration: false,   // security: keep Node out of renderer
-      contextIsolation: true,   // security: isolate contexts
-      sandbox: false,           // needed for preload require()
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: false,
     },
   });
 
@@ -465,14 +465,13 @@ function createWindow(ip) {
 
   // Retry once on load failure (Vite still warming up)
   mainWindow.webContents.on('did-fail-load', (_e, code, desc) => {
-    if (code === -3) return; // navigation aborted — ignore
+    if (code === -3) return;
     console.warn(`[Electron] Load failed (${code}: ${desc}) — retrying in 1.5s`);
     setTimeout(() => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(startUrl);
     }, 1500);
   });
 
-  // Open external links in OS browser, not in Electron
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
@@ -660,27 +659,49 @@ ipcMain.handle('run-prediction', async (_event, imagePath) => {
     // inference_runner.py: accepts --image, prints JSON on last stdout line
     const script = path.join(FL_CLIENT_DIR, 'inference_runner.py');
 
+    sendLog('prediction-log', `[Predict] Running inference on: ${imagePath}`);
+
     const proc = spawn(python, [script, '--image', imagePath], {
       cwd: FL_CLIENT_DIR,
       env: getPythonEnv(),
     });
 
     let stdout = '', stderr = '';
-    proc.stdout.on('data', (d) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.stdout.on('data', (d) => {
+      const text = d.toString();
+      stdout += text;
+      // Extract and log progress lines
+      text.split('\n').forEach(line => {
+        const trimmed = line.trim();
+        if (trimmed && (trimmed.includes('Loading') || trimmed.includes('Progress') || trimmed.includes('[Predict]'))) {
+          sendLog('prediction-log', `[Predict] ${trimmed}`);
+        }
+      });
+    });
+
+    proc.stderr.on('data', (d) => {
+      const text = d.toString();
+      stderr += text;
+      text.split('\n').filter(Boolean).forEach(line => {
+        sendLog('prediction-log', `[Predict Error] ${line}`);
+      });
+    });
 
     proc.on('close', (code) => {
       try {
         // The Python script prints JSON on the last line of stdout
         const lines  = stdout.trim().split('\n');
         const result = JSON.parse(lines[lines.length - 1]);
+        sendLog('prediction-log', `[Predict] ✅ Inference complete`);
         resolve({ success: true, prediction: result });
       } catch {
+        sendLog('prediction-log', `[Predict] ❌ Failed to parse results`);
         resolve({ success: false, stdout, stderr, exitCode: code });
       }
     });
 
     proc.on('error', (err) => {
+      sendLog('prediction-log', `[Predict] ❌ Error: ${err.message}`);
       resolve({ success: false, error: err.message });
     });
   });

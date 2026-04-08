@@ -23,7 +23,28 @@ const FL_SERVER = process.env.FL_SERVER_URL || 'http://localhost:6000';
  */
 const initiateRound = async (req, res) => {
   try {
-    const { clientList = [] } = req.body;
+    let { clientList = [] } = req.body;
+
+    // If no explicit client list provided, auto-discover all unique clients from previous rounds
+    if (clientList.length === 0) {
+      const allRounds = await FederatedLearning.find({}).sort({ roundNumber: -1 });
+      const uniqueClients = new Set();
+      
+      allRounds.forEach(round => {
+        if (round.clientList && Array.isArray(round.clientList)) {
+          round.clientList.forEach(client => {
+            if (client.clientId) uniqueClients.add(client.clientId);
+          });
+        }
+      });
+      
+      clientList = Array.from(uniqueClients);
+      console.log(`[FL] Auto-discovered ${clientList.length} unique clients:`, clientList);
+    }
+
+    if (clientList.length === 0) {
+      return res.status(400).json({ success: false, message: 'No clients to invite. Please specify clientList or previous rounds must exist.' });
+    }
 
     // Get current highest round number
     const last = await FederatedLearning.findOne({}).sort({ roundNumber: -1 });
@@ -116,24 +137,43 @@ const getTrainingStatus = async (req, res) => {
 
 const getAnalytics = async (req, res) => {
   try {
-    const rounds = await FederatedLearning.find({ status: 'completed' }).sort({ roundNumber: 1 });
+    // Get both completed AND active rounds for complete analytics
+    const allRounds = await FederatedLearning.find({}).sort({ roundNumber: -1 });
+    const completedRounds = allRounds.filter(r => r.status === 'completed');
+    const activeRound = allRounds.find(r => r.status === 'in-progress' || r.status === 'initiated');
+    
     const analytics = {
-      totalRounds: rounds.length,
-      averageAccuracy: rounds.length
-        ? (rounds.reduce((s, r) => s + (r.globalModelPerformance?.accuracy || 0), 0) / rounds.length).toFixed(4)
+      totalRounds: allRounds.length,
+      completedRounds: completedRounds.length,
+      averageAccuracy: completedRounds.length
+        ? (completedRounds.reduce((s, r) => s + (r.globalModelPerformance?.accuracy || 0), 0) / completedRounds.length * 100).toFixed(1)
         : 0,
-      bestAccuracy: rounds.length
-        ? Math.max(...rounds.map((r) => r.globalModelPerformance?.accuracy || 0)).toFixed(4)
+      bestAccuracy: completedRounds.length
+        ? (Math.max(...completedRounds.map((r) => r.globalModelPerformance?.accuracy || 0)) * 100).toFixed(1)
         : 0,
-      accuracyTrend: rounds.map((r) => ({
+      activeClientsCount: activeRound ? (activeRound.totalClients || 0) : 0,
+      activeRound: activeRound ? {
+        roundNumber: activeRound.roundNumber,
+        status: activeRound.status,
+        totalClients: activeRound.totalClients || 0,
+        participatingClients: activeRound.participatingClients || 0,
+        completedClients: (activeRound.clientList || []).filter(c => c.status === 'submitted' || c.status === 'trained').length,
+        startTime: activeRound.roundStartTime,
+        clients: (activeRound.clientList || []).map(c => ({
+          clientId: c.clientId,
+          status: c.status,
+          samplesUsed: c.samplesUsed || 0,
+        }))
+      } : null,
+      accuracyTrend: completedRounds.map((r) => ({
         round: r.roundNumber,
-        accuracy: r.globalModelPerformance?.accuracy || 0,
+        accuracy: (r.globalModelPerformance?.accuracy || 0) * 100,
       })),
-      lossTrend: rounds.map((r) => ({
+      lossTrend: completedRounds.map((r) => ({
         round: r.roundNumber,
         loss: r.globalModelPerformance?.loss || 0,
       })),
-      clientParticipation: rounds.map((r) => ({
+      clientParticipation: allRounds.map((r) => ({
         round: r.roundNumber,
         clients: r.participatingClients || 0,
       })),
@@ -209,6 +249,43 @@ const completeRound = async (req, res) => {
   }
 };
 
+/**
+ * Admin: Stop an ongoing round
+ */
+const stopRound = async (req, res) => {
+  try {
+    const { roundNumber } = req.body;
+    if (!roundNumber) {
+      return res.status(400).json({ success: false, message: 'roundNumber required' });
+    }
+
+    const updated = await FederatedLearning.findOneAndUpdate(
+      { roundNumber, status: { $in: ['initiated', 'in-progress'] } },
+      {
+        status: 'completed',
+        roundEndTime: new Date(),
+      },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ success: false, message: 'Round not found or already completed' });
+    }
+
+    // Notify FL server to stop this round
+    try {
+      await axios.post(`${FL_SERVER}/api/round/stop`, { roundNumber }, { timeout: 5000 });
+    } catch (err) {
+      console.warn('Could not notify FL server to stop round:', err.message);
+    }
+
+    res.json({ success: true, message: 'Round stopped', round: updated });
+  } catch (e) {
+    console.error('Error stopping round:', e);
+    res.status(500).json({ success: false, message: e.message });
+  }
+};
+
 module.exports = {
   getAllRounds,
   getRoundDetails,
@@ -217,4 +294,5 @@ module.exports = {
   recordClientSubmission,
   initiateRound,
   completeRound,
+  stopRound,
 };

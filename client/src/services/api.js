@@ -72,6 +72,7 @@ export const flService = {
     api.get('/federated-learning/rounds', { params: { page, limit } }),
   getRoundDetails: (id) => api.get(`/federated-learning/rounds/${id}`),
   initiateRound: (data) => api.post('/federated-learning/rounds/initiate', data),
+  stopRound: (data) => api.post('/federated-learning/rounds/stop', data),
   updateClientResults: (roundId, data) =>
     api.put(`/federated-learning/rounds/${roundId}/update-client`, data),
   completeRound: (roundId, data) =>

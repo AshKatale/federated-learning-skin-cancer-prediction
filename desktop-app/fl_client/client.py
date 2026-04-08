@@ -184,7 +184,7 @@ def _run_local_training():
             data_dir=LOCAL_DATA_DIR,
             metadata_path=LOCAL_METADATA,
         )
-        num_samples = trainer.prepare_data()
+        num_samples = trainer.prepare_data(samples_per_class=999999)  # Use ALL images
         if num_samples == 0:
             logger.warning("No training data found in %s", LOCAL_DATA_DIR)
             return

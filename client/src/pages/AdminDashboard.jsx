@@ -18,6 +18,9 @@ export default function AdminDashboard() {
   // Local UI state
   const [loading, setLoading] = useState(true);
   const [initiatingRound, setInitiatingRound] = useState(false);
+  const [showClientModal, setShowClientModal] = useState(false);
+  const [selectedClients, setSelectedClients] = useState([]);
+  const [stoppingRound, setStoppingRound] = useState(false);
   const [error, setError] = useState('');
   const [localNode, setLocalNode] = useState(null);
   const [isElectron] = useState(!!window.electronAPI);
@@ -62,17 +65,99 @@ export default function AdminDashboard() {
     }
   };
 
+  // Extract unique clients from round history
+  const getAvailableClients = () => {
+    const clients = new Set();
+    rounds.forEach(round => {
+      if (round.clients && Array.isArray(round.clients)) {
+        round.clients.forEach(client => {
+          if (typeof client === 'string') {
+            clients.add(client);
+          } else if (client.id) {
+            clients.add(client.id);
+          } else if (client.clientId) {
+            clients.add(client.clientId);
+          }
+        });
+      }
+    });
+    return Array.from(clients).sort();
+  };
+
+  // Calculate the next round number based on active round or highest round
+  const getNextRoundNumber = () => {
+    let nextRound = 1;
+    
+    // Check active round from analytics
+    if (analytics?.activeRound?.roundNumber) {
+      nextRound = Math.max(nextRound, analytics.activeRound.roundNumber + 1);
+    }
+    
+    // Check total rounds from analytics
+    if (analytics?.totalRounds) {
+      nextRound = Math.max(nextRound, analytics.totalRounds + 1);
+    }
+    
+    // Check all rounds in the array to find max
+    if (rounds.length > 0) {
+      const maxRound = Math.max(...rounds.map(r => r.roundNumber || 0));
+      nextRound = Math.max(nextRound, maxRound + 1);
+    }
+    
+    return nextRound;
+  };
+
   const handleInitiateRound = async () => {
     setInitiatingRound(true);
     try {
-      await flService.initiateRound({ clientList: ['desktop_client_1'] });
+      const clientList = selectedClients.length > 0 ? selectedClients : [];
+      
+      await flService.initiateRound({ clientList });
       setError('');
+      setSelectedClients([]); // Clear selection
+      setShowClientModal(false);
       // Refresh data immediately
       fetchData();
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to initiate round');
     } finally {
       setInitiatingRound(false);
+    }
+  };
+
+  const handleSelectAllClients = () => {
+    const allClients = getAvailableClients();
+    if (selectedClients.length === allClients.length) {
+      setSelectedClients([]);
+    } else {
+      setSelectedClients(allClients);
+    }
+  };
+
+  const toggleClientSelection = (clientId) => {
+    setSelectedClients(prev =>
+      prev.includes(clientId)
+        ? prev.filter(id => id !== clientId)
+        : [...prev, clientId]
+    );
+  };
+
+  const handleStopRound = async () => {
+    if (!analytics?.activeRound) return;
+    if (!window.confirm(`Stop round ${analytics.activeRound.roundNumber}? This cannot be undone.`)) return;
+    
+    setStoppingRound(true);
+    try {
+      const response = await flService.stopRound({ roundNumber: analytics.activeRound.roundNumber });
+      setError('');
+      if (response.data?.success) {
+        alert('Round stopped successfully');
+        fetchData();
+      }
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to stop round');
+    } finally {
+      setStoppingRound(false);
     }
   };
 
@@ -100,7 +185,7 @@ export default function AdminDashboard() {
             <div className="page-subtitle">Monitor and manage distributed model training rounds</div>
           </div>
           <button
-            onClick={handleInitiateRound}
+            onClick={() => setShowClientModal(true)}
             disabled={initiatingRound}
             className="btn btn-primary"
           >
@@ -125,19 +210,127 @@ export default function AdminDashboard() {
           <>
             {/* Analytics Stats */}
             {analytics && (
-              <div className="stats-grid">
-                {[
-                  { label: 'Total Rounds', value: analytics.totalRounds },
-                  { label: 'Best Accuracy', value: `${(analytics.bestAccuracy * 100).toFixed(1)}%`, valueClass: 'accent' },
-                  { label: 'Avg Accuracy', value: `${(analytics.averageAccuracy * 100).toFixed(1)}%`, valueClass: 'primary' },
-                  { label: 'Participants', value: analytics.totalClientsParticipated },
-                ].map(({ label, value, valueClass }) => (
-                  <div key={label} className="stat-card">
-                    <div className="stat-label">{label}</div>
-                    <div className={`stat-value ${valueClass || ''}`}>{value}</div>
+              <>
+                <div className="stats-grid">
+                  {[
+                    { label: 'Total Rounds', value: analytics.totalRounds },
+                    { label: 'Completed Rounds', value: analytics.completedRounds, valueClass: 'accent' },
+                    { label: 'Best Accuracy', value: `${analytics.bestAccuracy}%`, valueClass: 'accent' },
+                    { label: 'Avg Accuracy', value: `${analytics.averageAccuracy}%`, valueClass: 'primary' },
+                    { label: 'Active Clients', value: analytics.activeClientsCount },
+                  ].map(({ label, value, valueClass }) => (
+                    <div key={label} className="stat-card">
+                      <div className="stat-label">{label}</div>
+                      <div className={`stat-value ${valueClass || ''}`}>{value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Active Round Status */}
+                {analytics.activeRound && (
+                  <div className="card" style={{ marginBottom: 20, borderLeft: '4px solid #3b82f6' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                      <div>
+                        <div className="card-title" style={{ marginBottom: 4 }}>
+                          🔄 Active Round #{analytics.activeRound.roundNumber}
+                        </div>
+                        <div style={{ fontSize: 13, color: 'var(--text-3)' }}>
+                          Status: <span style={{ fontWeight: 600, color: '#3b82f6' }}>{analytics.activeRound.status.toUpperCase()}</span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={handleStopRound}
+                        disabled={stoppingRound}
+                        style={{
+                          padding: '8px 16px',
+                          borderRadius: 6,
+                          border: 'none',
+                          background: '#ef4444',
+                          color: '#fff',
+                          fontSize: 13,
+                          fontWeight: 600,
+                          cursor: stoppingRound ? 'not-allowed' : 'pointer',
+                          opacity: stoppingRound ? 0.6 : 1,
+                        }}
+                      >
+                        {stoppingRound ? '⏹ Stopping…' : '⏹ Stop Round'}
+                      </button>
+                    </div>
+
+                    {/* Client Progress */}
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 13 }}>
+                        <span style={{ color: 'var(--text-2)', fontWeight: 600 }}>Client Progress</span>
+                        <span style={{ color: 'var(--text-3)' }}>
+                          {analytics.activeRound.completedClients} / {analytics.activeRound.totalClients} completed
+                        </span>
+                      </div>
+                      <div style={{
+                        height: 24,
+                        background: 'var(--surface-2)',
+                        borderRadius: 6,
+                        overflow: 'hidden',
+                        border: '1px solid var(--border)',
+                      }}>
+                        <div style={{
+                          height: '100%',
+                          width: `${analytics.activeRound.totalClients > 0 ? (analytics.activeRound.completedClients / analytics.activeRound.totalClients * 100) : 0}%`,
+                          background: 'linear-gradient(90deg, #10b981, #059669)',
+                          transition: 'width 0.3s ease',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          paddingRight: 8,
+                        }}>
+                          {analytics.activeRound.totalClients > 0 && (
+                            <span style={{ fontSize: 11, fontWeight: 700, color: '#fff' }}>
+                              {Math.round((analytics.activeRound.completedClients / analytics.activeRound.totalClients * 100))}%
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Client List */}
+                    {analytics.activeRound.clients && analytics.activeRound.clients.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-2)', marginBottom: 8 }}>
+                          Clients in this Round
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
+                          {analytics.activeRound.clients.map((client) => (
+                            <div key={client.clientId} style={{
+                              padding: 12,
+                              background: 'var(--surface-2)',
+                              borderRadius: 6,
+                              border: `1px solid var(--border)`,
+                              fontSize: 12,
+                            }}>
+                              <div style={{ fontWeight: 600, color: 'var(--text-1)', marginBottom: 4 }}>
+                                {client.clientId}
+                              </div>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-3)' }}>
+                                <span>Status:</span>
+                                <span style={{
+                                  fontWeight: 600,
+                                  color: client.status === 'submitted' || client.status === 'trained' ? '#10b981' : '#f59e0b',
+                                }}>
+                                  {client.status}
+                                </span>
+                              </div>
+                              {client.samplesUsed && (
+                                <div style={{ marginTop: 4, color: 'var(--text-3)' }}>
+                                  Samples: <strong>{client.samplesUsed}</strong>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                ))}
-              </div>
+                )}
+              </>
             )}
 
             {/* Desktop Node Controls */}
@@ -282,6 +475,178 @@ export default function AdminDashboard() {
               )}
             </div>
           </>
+        )}
+
+        {/* Client Selection Modal */}
+        {showClientModal && (
+          <div
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              background: 'rgba(0, 0, 0, 0.5)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              zIndex: 1000,
+            }}
+            onClick={() => setShowClientModal(false)}
+          >
+            <div
+              style={{
+                background: '#ffffff',
+                borderRadius: 12,
+                padding: 24,
+                maxWidth: 550,
+                width: '90%',
+                maxHeight: '80vh',
+                overflow: 'auto',
+                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3)',
+              }}
+              onClick={e => e.stopPropagation()}
+            >
+              <div style={{ marginBottom: 20 }}>
+                <h3 style={{ margin: '0 0 4px 0', fontSize: 18, fontWeight: 700, color: '#1f2937' }}>
+                  🤖 Round #{getNextRoundNumber()}
+                </h3>
+                <p style={{ margin: 0, fontSize: 13, color: '#6b7280' }}>
+                  Select clients to participate in this training round. Leave empty to auto-discover from previous rounds.
+                </p>
+              </div>
+
+              {getAvailableClients().length > 0 ? (
+                <>
+                  <div style={{
+                    background: '#f9fafb',
+                    padding: 12,
+                    borderRadius: 8,
+                    marginBottom: 16,
+                    border: '1px solid #e5e7eb',
+                  }}>
+                    <label style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      cursor: 'pointer',
+                      fontWeight: 600,
+                      fontSize: 13,
+                      color: '#111827',
+                    }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedClients.length === getAvailableClients().length && getAvailableClients().length > 0}
+                        onChange={handleSelectAllClients}
+                        style={{ cursor: 'pointer', width: 18, height: 18 }}
+                      />
+                      ✓ Select All ({selectedClients.length}/{getAvailableClients().length})
+                    </label>
+                  </div>
+
+                  <div style={{
+                    background: '#f9fafb',
+                    borderRadius: 8,
+                    border: '1px solid #e5e7eb',
+                    padding: 12,
+                    maxHeight: 300,
+                    overflowY: 'auto',
+                    marginBottom: 16,
+                  }}>
+                    {getAvailableClients().map((client) => (
+                      <label key={client} style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        padding: '10px 8px',
+                        cursor: 'pointer',
+                        borderRadius: 6,
+                        transition: 'background 0.2s',
+                        background: selectedClients.includes(client) ? 'rgba(59, 130, 246, 0.1)' : 'transparent',
+                        color: '#111827',
+                        fontSize: 13,
+                        fontFamily: 'var(--mono)',
+                      }}
+                      onMouseEnter={(e) => !selectedClients.includes(client) && (e.currentTarget.style.background = 'rgba(59, 130, 246, 0.05)')}
+                      onMouseLeave={(e) => !selectedClients.includes(client) && (e.currentTarget.style.background = 'transparent')}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedClients.includes(client)}
+                          onChange={() => toggleClientSelection(client)}
+                          style={{ cursor: 'pointer', width: 16, height: 16 }}
+                        />
+                        {client}
+                      </label>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div style={{
+                  background: '#f9fafb',
+                  borderRadius: 8,
+                  padding: 24,
+                  textAlign: 'center',
+                  marginBottom: 16,
+                  color: '#6b7280',
+                  fontSize: 13,
+                  border: '1px solid #e5e7eb',
+                }}>
+                  No clients available yet. Round will auto-discover from previous data.
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end', paddingTop: 16, borderTop: '1px solid #e5e7eb' }}>
+                <button
+                  onClick={() => {
+                    setShowClientModal(false);
+                    setSelectedClients([]);
+                  }}
+                  style={{
+                    padding: '10px 18px',
+                    borderRadius: 6,
+                    border: '1px solid #d1d5db',
+                    background: '#ffffff',
+                    color: '#374151',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    transition: 'all 0.2s',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = '#f3f4f6';
+                    e.currentTarget.style.borderColor = '#9ca3af';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = '#ffffff';
+                    e.currentTarget.style.borderColor = '#d1d5db';
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleInitiateRound}
+                  disabled={initiatingRound}
+                  style={{
+                    padding: '10px 18px',
+                    borderRadius: 6,
+                    border: 'none',
+                    background: '#3b82f6',
+                    color: '#ffffff',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: initiatingRound ? 'not-allowed' : 'pointer',
+                    opacity: initiatingRound ? 0.6 : 1,
+                    transition: 'all 0.2s',
+                  }}
+                  onMouseEnter={(e) => !initiatingRound && (e.currentTarget.style.background = '#2563eb')}
+                  onMouseLeave={(e) => !initiatingRound && (e.currentTarget.style.background = '#3b82f6')}
+                >
+                  {initiatingRound ? '⏳ Initiating…' : `▶ Start Round #${getNextRoundNumber()}`}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </AppShell>

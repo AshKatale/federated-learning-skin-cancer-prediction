@@ -61,6 +61,10 @@ export default function FLControlPanel() {
   const [evaluating,    setEvaluating]    = useState(false);   // Evaluation in progress
   const [evalResults,   setEvalResults]   = useState(null);    // Evaluation results
   const [cudaProgress,  setCudaProgress]  = useState(null);    // CUDA download progress
+  const [trainingLogs,  setTrainingLogs]  = useState([]);      // Training logs only
+  const [predictionLogs, setPredictionLogs] = useState([]);    // Prediction logs only
+  const [evaluationLogs, setEvaluationLogs] = useState([]);    // Evaluation logs only
+  const [liveRoundData, setLiveRoundData] = useState(null);   // Active round info from server
 
   const logsEndRef = useRef(null);
 
@@ -86,7 +90,7 @@ export default function FLControlPanel() {
   // ── Scroll logs to bottom ──────────────────────────────────────────────────
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
+  }, [logs, trainingLogs, predictionLogs, evaluationLogs]);
 
   const hasAutoSwitched = useRef(false);
 
@@ -106,7 +110,20 @@ export default function FLControlPanel() {
   // Re-subscribes when component remounts (after page navigation)
   useEffect(() => {
     if (!api) return;
-    const cleanup = api.onTrainingLog?.((line) => addLog(line));
+    const cleanup = api.onTrainingLog?.((line) => {
+      setTrainingLogs((prev) => [...prev.slice(-200), line]); // Keep last 200 lines
+      addLog(line); // Also add to global logs for backward compatibility
+    });
+    return () => { if (typeof cleanup === 'function') cleanup(); };
+  }, [addLog]);
+
+  // ── Subscribe to streaming prediction logs from main process ─────────────────
+  useEffect(() => {
+    if (!api) return;
+    const cleanup = api.onPredictionLog?.((line) => {
+      setPredictionLogs((prev) => [...prev.slice(-200), line]); // Keep last 200 lines
+      addLog(line); // Also add to global logs for backward compatibility
+    });
     return () => { if (typeof cleanup === 'function') cleanup(); };
   }, [addLog]);
 
@@ -134,7 +151,10 @@ export default function FLControlPanel() {
   // ── Subscribe to streaming evaluation logs from main process ────────────────
   useEffect(() => {
     if (!api) return;
-    const cleanup = api.onEvaluationLog?.((line) => addLog(line));
+    const cleanup = api.onEvaluationLog?.((line) => {
+      setEvaluationLogs((prev) => [...prev.slice(-200), line]); // Keep last 200 lines
+      addLog(line); // Also add to global logs for backward compatibility
+    });
     return () => { if (typeof cleanup === 'function') cleanup(); };
   }, [addLog]);
 
@@ -228,6 +248,16 @@ export default function FLControlPanel() {
       ]);
       setAppStatus(as);
       setFlStatus(fs);
+      
+      // Also fetch live round data (activeRound info)
+      try {
+        const analyticsRes = await api.getAnalytics?.();
+        if (analyticsRes?.data?.analytics?.activeRound) {
+          setLiveRoundData(analyticsRes.data.analytics.activeRound);
+        }
+      } catch (err) {
+        // Silently fail
+      }
     };
     fetch();
     const id = setInterval(fetch, 15000);
@@ -266,6 +296,7 @@ export default function FLControlPanel() {
 
     setTraining(true);
     setPanelTab('train');
+    setTrainingLogs([]); // Clear training logs for this run
     clearLogs();
     addLog(`[Train] Starting local training  epochs=${epochs}  client=${contextClientId}  device=${device}`);
     addLog(`[Train] Dataset: ${datasetPath || '(default)'}`);
@@ -351,6 +382,7 @@ export default function FLControlPanel() {
     if (!api || predicting || !imagePath) return;
     setPredicting(true);
     setPrediction(null);
+    setPredictionLogs([]); // Clear prediction logs for this run
     addLog(`[Predict] Running inference on: ${imagePath}`);
 
     try {
@@ -385,6 +417,7 @@ export default function FLControlPanel() {
     if (!api || evaluating || !testDir) return;
     setEvaluating(true);
     setEvalResults(null);
+    setEvaluationLogs([]); // Clear evaluation logs for this run
     addLog(`[Evaluate] Starting model evaluation…`);
     addLog(`[Evaluate] Test folder: ${testDir}`);
 
@@ -618,6 +651,104 @@ export default function FLControlPanel() {
             )}
           </div>
 
+          {/* Round Status Card */}
+          {contextFlStatus && !contextFlStatus.error && (
+            <div style={{
+              background: 'var(--surface-2)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              padding: '16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 10,
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-1)' }}>
+                🔄 Current Round Status
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 4 }}>Current Round</div>
+                  <div style={{
+                    fontSize: 20,
+                    fontWeight: 700,
+                    color: 'var(--accent)',
+                  }}>
+                    Round {contextFlStatus.synced_round || '?'}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 4 }}>This Client</div>
+                  <div style={{
+                    fontSize: 14,
+                    fontWeight: 600,
+                    color: contextTraining ? '#22c55e' : '#f59e0b',
+                    textTransform: 'uppercase',
+                  }}>
+                    {contextTraining ? '🟢 Training' : '⏳ Waiting'}
+                  </div>
+                </div>
+              </div>
+
+              {/* Live Round Progress */}
+              {liveRoundData && (
+                <div style={{ paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 6 }}>
+                    Other Clients Progress
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{
+                        height: 20,
+                        background: 'var(--bg)',
+                        borderRadius: 4,
+                        overflow: 'hidden',
+                        border: '1px solid var(--border)',
+                        position: 'relative',
+                      }}>
+                        <div style={{
+                          height: '100%',
+                          width: `${liveRoundData.totalClients > 0 ? (liveRoundData.completedClients / liveRoundData.totalClients * 100) : 0}%`,
+                          background: '#10b981',
+                          transition: 'width 0.3s ease',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}>
+                          {liveRoundData.totalClients > 0 && liveRoundData.completedClients / liveRoundData.totalClients > 0.2 && (
+                            <span style={{ fontSize: 10, fontWeight: 700, color: '#fff' }}>
+                              {Math.round((liveRoundData.completedClients / liveRoundData.totalClients * 100))}%
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-1)', minWidth: 60, textAlign: 'right' }}>
+                      {liveRoundData.completedClients} / {liveRoundData.totalClients}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ fontSize: 12, color: 'var(--text-2)', lineHeight: 1.6 }}>
+                {contextTraining ? (
+                  <>
+                    <strong>🏃 Training in progress…</strong><br/>
+                    Your model is being trained locally. Once complete, weights will be uploaded automatically.
+                  </>
+                ) : (
+                  <>
+                    <strong>✅ Ready for next round</strong><br/>
+                    {liveRoundData ? (
+                      <>Waiting for {liveRoundData.totalClients - liveRoundData.completedClients} more client{liveRoundData.totalClients - liveRoundData.completedClients !== 1 ? 's' : ''} to finish before aggregation.</>
+                    ) : (
+                      <>Waiting for FL server to initiate next round…</>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Action buttons */}
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <button
@@ -652,8 +783,20 @@ export default function FLControlPanel() {
           </div>
 
           {/* Inline log preview */}
-          {logs.length > 0 && (
-            <LogBox logs={logs} logsEndRef={logsEndRef} />
+          {trainingLogs.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-2)' }}>Training Logs</span>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setTrainingLogs([])}
+                  style={{ fontSize: 11 }}
+                >
+                  Clear
+                </button>
+              </div>
+              <LogBox logs={trainingLogs} logsEndRef={logsEndRef} />
+            </div>
           )}
         </div>
       )}
@@ -673,7 +816,7 @@ export default function FLControlPanel() {
             <input
               readOnly
               value={imagePath}
-              placeholder="Select a skin lesion image…"
+              placeholder="Select a skin cancer image…"
               style={{
                 flex: 1, padding: '9px 12px', borderRadius: 8, border: '1px solid var(--border)',
                 background: 'var(--surface-2)', color: 'var(--text-1)', fontSize: 13,
@@ -697,6 +840,23 @@ export default function FLControlPanel() {
 
           {/* Prediction result */}
           {prediction && <PredictionCard pred={prediction} />}
+
+          {/* Prediction logs */}
+          {predictionLogs.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-2)' }}>Prediction Logs</span>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setPredictionLogs([])}
+                  style={{ fontSize: 11 }}
+                >
+                  Clear
+                </button>
+              </div>
+              <LogBox logs={predictionLogs} logsEndRef={logsEndRef} />
+            </div>
+          )}
         </div>
       )}
 
@@ -833,10 +993,17 @@ export default function FLControlPanel() {
           )}
 
           {/* Progress logs */}
-          {(evaluating || evalResults) && (
+          {(evaluating || evaluationLogs.length > 0) && (
             <>
-              <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-2)', marginTop: 8 }}>
-                Evaluation Logs
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
+                <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-2)' }}>Evaluation Logs</span>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setEvaluationLogs([])}
+                  style={{ fontSize: 11 }}
+                >
+                  Clear
+                </button>
               </div>
               <div style={{
                 backgroundColor: 'var(--surface-2)',
@@ -850,7 +1017,7 @@ export default function FLControlPanel() {
                 whiteSpace: 'pre-wrap',
                 wordBreak: 'break-word',
               }}>
-                {logs.filter(log => log.includes('[Eval')).join('\n') || 'No logs...'}
+                {evaluationLogs.length > 0 ? evaluationLogs.join('\n') : 'No logs...'}
               </div>
             </>
           )}

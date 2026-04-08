@@ -42,12 +42,13 @@ const VALID_INVOKE = new Set([
 // ── Whitelisted listener channels (main → renderer) ──────────────────────────
 const VALID_ON = new Set([
   'training-log',
+  'prediction-log',
+  'evaluation-log',
   'trigger-sync',
   'trigger-train',
   'dataset-changed',
   'cuda-install-log',
   'cuda-progress',
-  'evaluation-log',
 ]);
 
 /** Safe invoke — rejects unknown channels immediately. */
@@ -138,6 +139,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   /** Stream training log lines from Python process. Returns cleanup fn. */
   onTrainingLog:   (cb) => safeOn('training-log', cb),
+
+  /** Stream prediction log lines from Python process. Returns cleanup fn. */
+  onPredictionLog: (cb) => safeOn('prediction-log', cb),
 
   /** Menu: "Sync Global Model" was clicked. */
   onTriggerSync:   (cb) => safeOn('trigger-sync', cb),

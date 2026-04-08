@@ -127,7 +127,7 @@ export default function PredictionHistory() {
         <div className="page-header">
           <div>
             <div className="page-title">Prediction History</div>
-            <div className="page-subtitle">All your past skin lesion analyses</div>
+            <div className="page-subtitle">All your past skin cancer predictions &amp; assessments</div>
           </div>
         </div>
 

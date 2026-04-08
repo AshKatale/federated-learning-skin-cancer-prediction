@@ -47,7 +47,7 @@ export default function ModelInfo({ modelInfo }) {
 
       {/* Classification Classes */}
       <div className="info-section">
-        <h2>🏷️ Skin Lesion Classification Categories</h2>
+        <h2>🏷️ Skin Cancer &amp; Lesion Classification Categories</h2>
         <div className="classes-grid">
           {modelInfo.class_labels?.map((className, index) => (
             <div key={index} className="class-item">
@@ -74,17 +74,17 @@ export default function ModelInfo({ modelInfo }) {
 
       {/* About This Tool */}
       <div className="info-section">
-        <h2>ℹ️ About This Application</h2>
+        <h2>ℹ️ About This Skin Cancer Detection Tool</h2>
         <div className="about-text">
           <p>
-            This is a deep learning-based skin lesion analysis tool built using 
+            This is a deep learning-based skin cancer and lesion detection tool built using 
             <strong> EfficientNet-B0</strong>, a state-of-the-art convolutional neural network architecture.
             The model has been trained on the <strong> HAM10000</strong> dataset, which contains 
-            10,015 high-quality dermatoscopic images of various skin conditions.
+            10,015 high-quality dermatoscopic images of various skin conditions and cancers.
           </p>
           
           <p>
-            <strong>The model classifies skin lesions into 7 categories:</strong>
+            <strong>The model classifies skin lesions into 7 categories, including common skin cancers:</strong>
           </p>
           
           <ul>

@@ -9,9 +9,23 @@ import ProfilePage from './pages/ProfilePage';
 import PredictionHistory from './pages/PredictionHistory';
 import AdminDashboard from './pages/AdminDashboard';
 import FLDashboard from './pages/FLDashboard';
+import LandingPage from './pages/LandingPage';
+
+// Detect if running inside Electron (desktop app) via the exposed preload API
+const isElectron = typeof window !== 'undefined' && typeof window.electronAPI !== 'undefined';
 
 function App() {
   const token = localStorage.getItem('token');
+
+  // Root route logic:
+  //   - If logged in → dashboard (both web + desktop)
+  //   - If desktop (Electron) → login directly (no landing page)
+  //   - If web + not logged in → landing page
+  const rootElement = token
+    ? <Navigate to="/dashboard" />
+    : isElectron
+      ? <Navigate to="/login" />
+      : <LandingPage />;
 
   return (
     <FLContextProvider>
@@ -24,7 +38,7 @@ function App() {
           <Route path="/predictions" element={<ProtectedRoute><PredictionHistory /></ProtectedRoute>} />
           <Route path="/fl"          element={<ProtectedRoute><FLDashboard /></ProtectedRoute>} />
           <Route path="/admin"       element={<ProtectedRoute requiredRole="admin"><AdminDashboard /></ProtectedRoute>} />
-          <Route path="/"            element={token ? <Navigate to="/dashboard" /> : <Navigate to="/login" />} />
+          <Route path="/"            element={rootElement} />
         </Routes>
       </Router>
     </FLContextProvider>
@@ -32,3 +46,4 @@ function App() {
 }
 
 export default App;
+

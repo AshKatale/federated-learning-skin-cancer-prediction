@@ -98,7 +98,7 @@ export default function BatchPredictor({ onResults }) {
       >
         <div className="upload-prompt">
           <div className="upload-icon">🖼️</div>
-          <p>Select multiple skin lesion images for batch analysis</p>
+          <p>Select multiple skin cancer images for batch analysis</p>
           <button
             className="select-files-btn"
             onClick={() => fileInputRef.current?.click()}

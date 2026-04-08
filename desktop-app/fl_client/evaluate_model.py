@@ -34,6 +34,7 @@ import io
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -154,28 +155,50 @@ def load_model_weights(model: SkinCancerModel, server_url: str, model_path: str 
     """
     Try (in order):
       1. --model-path local file
-      2. Latest checkpoint in ./local_weights/
-      3. FL server download
+      2. global_model_round_N.pth (user-uploaded trained model)
+      3. FL server download (always preferred – gets latest)
+      4. Latest local checkpoint in ./local_weights/
     Returns a string describing the source.
     """
+    def load_with_retry(path_str, max_retries=3, delay_sec=1):
+        """Load a file with retry logic for permission/lock issues."""
+        for attempt in range(max_retries):
+            try:
+                state_dict = torch.load(path_str, map_location="cpu")
+                return state_dict
+            except PermissionError as e:
+                if attempt < max_retries - 1:
+                    log(f"[Eval] Warning: File locked, retrying in {delay_sec}s... (attempt {attempt+1}/{max_retries})")
+                    time.sleep(delay_sec)
+                else:
+                    raise
+    
     # 1. Explicit local path
     if model_path and Path(model_path).exists():
         log(f"[Eval] Loading weights from {model_path}")
-        state_dict = torch.load(model_path, map_location="cpu")
+        state_dict = load_with_retry(model_path)
         model.set_model_state_dict(state_dict)
         return "local_file"
 
-    # 2. Latest local checkpoint
+    # 2. Check for Colab-trained model (best_skin_cancer_model.pth)
     weights_dir = Path(__file__).parent / "local_weights"
-    checkpoints = sorted(weights_dir.glob("global_round_*.pt"))
-    if checkpoints:
-        p = checkpoints[-1]
-        log(f"[Eval] Loading latest checkpoint: {p.name}")
-        state_dict = torch.load(str(p), map_location="cpu")
+    colab_model = weights_dir / "best_skin_cancer_model.pth"
+    if colab_model.exists():
+        log(f"[Eval] Loading Colab-trained model: {colab_model.name}")
+        state_dict = load_with_retry(str(colab_model))
         model.set_model_state_dict(state_dict)
-        return f"local_checkpoint ({p.name})"
+        return f"colab_trained_model ({colab_model.name})"
 
-    # 3. FL server download
+    # 3. Check for FL-trained models (global_model_round_N.pth pattern)
+    trained_models = sorted(weights_dir.glob("global_model_round_*.pth"))
+    if trained_models:
+        p = trained_models[-1]
+        log(f"[Eval] Loading FL-trained model: {p.name}")
+        state_dict = load_with_retry(str(p))
+        model.set_model_state_dict(state_dict)
+        return f"fl_trained_model ({p.name})"
+
+    # 4. FL server download (PRIORITY: always try server first for freshness)
     if server_url:
         try:
             log(f"[Eval] Downloading global model from {server_url} …")
@@ -202,7 +225,17 @@ def load_model_weights(model: SkinCancerModel, server_url: str, model_path: str 
 
         except Exception as e:
             log(f"[Eval] FL server download failed: {e}")
-            log("[Eval] Falling back to ImageNet pretrained weights.")
+            log("[Eval] Falling back to local checkpoints or pretrained...")
+
+    # 5. Fall back to any local checkpoint (older global_round_*.pt files)
+    weights_dir = Path(__file__).parent / "local_weights"
+    old_checkpoints = sorted(weights_dir.glob("global_round_*.pt"))
+    if old_checkpoints:
+        p = old_checkpoints[-1]
+        log(f"[Eval] WARNING: Using older checkpoint {p.name} – not latest trained model!")
+        state_dict = load_with_retry(str(p))
+        model.set_model_state_dict(state_dict)
+        return f"local_old_checkpoint ({p.name})"
 
     return "pretrained"
 
@@ -217,6 +250,7 @@ def evaluate(data_dir: str, metadata_path: str, server_url: str, model_path: str
     log("[Eval] Initialising model …")
     model = SkinCancerModel()
     source = load_model_weights(model, server_url, model_path)
+    log(f"[Eval] Model source: {source}")
 
     net = model.model if hasattr(model, "model") else model
     net = net.to(device).eval()

@@ -88,7 +88,7 @@ export default function Dashboard() {
         <div className="page-header">
           <div>
             <div className="page-title">Dashboard</div>
-            <div className="page-subtitle">AI-powered skin lesion analysis &amp; monitoring</div>
+            <div className="page-subtitle">AI-powered Skin Cancer Detection &amp; Risk Assessment</div>
           </div>
           <Link to="/predictions" className="btn btn-secondary btn-sm">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

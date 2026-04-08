@@ -167,15 +167,36 @@ def main():
         log(f'[FL Training] Metadata found: {metadata_path}')
         log(f'[FL Training] Loading client data (client_id={args.client_id})…')
 
-        # Get current round from FL server
+        # Get current round from FL server (with retry logic)
         fl_server_url = f'http://{args.server}' if '://' not in args.server else args.server
-        current_round = 0
-        try:
-            if requests:
-                resp = requests.get(f'{fl_server_url}/api/round/status', timeout=3)
-                current_round = resp.json().get('current_round', 0)
-        except Exception as e:
-            log(f'[FL Training] Warning: Could not fetch round number: {e}')
+        current_round = None
+        
+        # Retry loop: try up to 3 times to fetch the round
+        for attempt in range(1, 4):
+            try:
+                resp = requests.get(f'{fl_server_url}/api/round/status', timeout=5)
+                if resp.status_code == 200:
+                    current_round = resp.json().get('current_round')
+                    if current_round is not None:
+                        log(f'[FL Training] ✓ Fetched current round: {current_round}')
+                        break
+            except Exception as e:
+                if attempt < 3:
+                    log(f'[FL Training] ⚠ Round fetch attempt {attempt}/3 failed: {e}')
+                else:
+                    log(f'[FL Training] ⚠ Could not fetch round number after 3 attempts: {e}')
+        
+        # Fallback strategy if round could not be determined
+        if current_round is None:
+            # Try to use environment variable or cached round
+            cached_round = os.environ.get('FL_CURRENT_ROUND')
+            if cached_round and cached_round.isdigit():
+                current_round = int(cached_round)
+                log(f'[FL Training] ⚠ Using cached round from environment: {current_round}')
+            else:
+                log(f'[FL Training] ⚠ Could not determine current round. Weights will NOT be uploaded.')
+                log(f'[FL Training] ⚠ Suggestion: Start FL server before running training.')
+                current_round = -1  # Use -1 to indicate "unknown", will skip upload
 
         # Use LocalTrainer to prepare data
         trainer = LocalTrainer(model_wrapper, image_dir, metadata_path, 
@@ -209,31 +230,35 @@ def main():
         log(f'[FL Training] Weights saved → {checkpoint_path}')
 
         # ── Auto-upload trained weights to FL server ──────────────────────────
-        log(f'[FL Training] Auto-uploading weights to FL server…')
-        try:
-            # Load trained weights and upload to FL server's /api/client/update endpoint
-            state_dict = torch.load(checkpoint_path, map_location='cpu')
-            weights_b64 = model_wrapper._state_dict_to_b64(state_dict)
-            
-            fl_server_url = f'http://{args.server}' if '://' not in args.server else args.server
-            upload_response = requests.post(
-                f'{fl_server_url}/api/client/update',
-                json={
-                    'client_id': args.client_id,
-                    'round': current_round,
-                    'num_samples': num_samples,
-                    'weights_b64': weights_b64,
-                },
-                timeout=30
-            )
-            
-            if upload_response.status_code == 200:
-                log(f'[FL Training] ✓ Weights uploaded successfully')
-            else:
-                log(f'[FL Training] ⚠ Upload response: {upload_response.status_code}')
-                log(f'[FL Training] Response: {upload_response.text}')
-        except Exception as upload_err:
-            log(f'[FL Training] ⚠ Upload failed (non-fatal): {upload_err}')
+        if current_round >= 0:
+            log(f'[FL Training] Auto-uploading weights to FL server (round {current_round})…')
+            try:
+                # Load trained weights and upload to FL server's /api/client/update endpoint
+                state_dict = torch.load(checkpoint_path, map_location='cpu')
+                weights_b64 = model_wrapper._state_dict_to_b64(state_dict)
+                
+                fl_server_url = f'http://{args.server}' if '://' not in args.server else args.server
+                upload_response = requests.post(
+                    f'{fl_server_url}/api/client/update',
+                    json={
+                        'client_id': args.client_id,
+                        'round': current_round,
+                        'num_samples': num_samples,
+                        'weights_b64': weights_b64,
+                    },
+                    timeout=30
+                )
+                
+                if upload_response.status_code == 200:
+                    log(f'[FL Training] ✓ Weights uploaded successfully')
+                else:
+                    log(f'[FL Training] ⚠ Upload response: {upload_response.status_code}')
+                    log(f'[FL Training] Response: {upload_response.text}')
+            except Exception as upload_err:
+                log(f'[FL Training] ⚠ Upload failed (non-fatal): {upload_err}')
+        else:
+            log(f'[FL Training] ⚠ Skipping upload: could not determine current round')
+            log(f'[FL Training] ⚠ Weights saved locally but NOT uploaded to server')
 
         result = {
             'success':      True,
