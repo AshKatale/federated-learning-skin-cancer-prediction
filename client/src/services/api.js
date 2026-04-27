@@ -1,10 +1,10 @@
 import axios from 'axios';
 
-// In dev: use relative URL → goes through Vite proxy → no CORS
-// In prod (Electron file:// or built): use absolute URL
+// In dev: use relative URL → Vite proxy forwards to deployed server → no CORS
+// In prod (Electron file:// or built): use absolute deployed URL
 const isElectronProd = window.location.protocol === 'file:';
 const API_BASE = isElectronProd
-  ? 'http://localhost:3001/api'
+  ? 'https://federated-learning-skin-cancer-prediction.onrender.com/api'
   : '/api';
 
 const api = axios.create({
